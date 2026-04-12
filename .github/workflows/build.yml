@@ -1,0 +1,46 @@
+name: Build A52s Kernel KSU-Next + SUSFS
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cài đặt công cụ build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison lz4 libssl-dev libelf-dev clang-14
+
+      - name: Tải mã nguồn Kernel A52s
+        run: |
+          git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel-source
+
+      - name: Tích hợp KSU-Next (v3)
+        run: |
+          cd kernel-source
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+
+      - name: Tích hợp SUSFS (Ẩn Root siêu sâu)
+        run: |
+          cd kernel-source
+          # Tải các file vá lỗi SUSFS cho bản kernel 5.4
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          cp susfs4ksu/kernel_patches/5.4/susfs_v1.5.2_5.4.patch .
+          cp susfs4ksu/kernel_patches/fs/susfs.c fs/
+          cp susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+          # Chạy lệnh vá (patch)
+          patch -p1 < susfs_v1.5.2_5.4.patch
+
+      - name: Bắt đầu biên dịch (Build)
+        run: |
+          cd kernel-source
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make O=out a52sxq_defconfig
+          make O=out -j$(nproc)
+
+      - name: Lưu trữ thành phẩm
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-A52s-KSU-Next-SUSFS
+          path: kernel-source/out/arch/arm64/boot/boot.img
