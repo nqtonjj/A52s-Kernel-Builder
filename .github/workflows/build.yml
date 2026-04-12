@@ -23,12 +23,16 @@ jobs:
       - name: 4. Tich hop Ao Tang Hinh SUSFS
         run: |
           cd kernel
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git
-          # Dung dau sao (*) de tu dong lụm phien ban patch moi nhat
-          cp susfs4ksu/kernel_patches/5.4/susfs_*.patch .
-          cp susfs4ksu/kernel_patches/fs/susfs.c fs/
-          cp susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-          patch -p1 < susfs_*.patch || true
+          # Fix 1: Chi dinh ro robot vao dung nhanh kernel-5.4 cua ong Simon
+          git clone -b kernel-5.4 https://gitlab.com/simonpunk/susfs4ksu.git
+          
+          # Fix 2: Gọi dung ten file patch cua phien ban nay
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-5.4.patch .
+          cp susfs4ksu/kernel_patches/fs/* fs/
+          cp susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          # Chay lenh patch
+          patch -p1 < 50_add_susfs_in_kernel-5.4.patch || true
 
       - name: 5. Tien hanh nau Kernel
         run: |
@@ -37,10 +41,9 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang-14
           make O=out a52sxq_defconfig
+          
+          # Ép bật cong tac SUSFS dam bao no nam trong tim cua Kernel
+          echo "CONFIG_KSU_SUSFS=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> out/.config
+          
           make O=out -j$(nproc)
-
-      - name: 6. Dong goi file boot.img
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kernel-A52s-KSU-Next-SUSFS
-          path: kernel/out/arch/arm64/boot/boot.img
