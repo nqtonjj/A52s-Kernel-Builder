@@ -6,7 +6,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. Cai dat cong cu (Da fix loi thieu GCC)
+      - name: 1. Cai dat cong cu
         run: |
           sudo apt-get update
           sudo apt-get install -y bc build-essential git flex bison lz4 libssl-dev libelf-dev clang-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
@@ -15,10 +15,10 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop KSU-Next (v3)
+      - name: 3. Tich hop KSU-Next (Link da duoc fix)
         run: |
           cd kernel
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
 
       - name: 4. Tich hop Ao Tang Hinh SUSFS
         run: |
