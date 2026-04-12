@@ -24,10 +24,11 @@ jobs:
         run: |
           cd kernel
           git clone https://gitlab.com/simonpunk/susfs4ksu.git
-          cp susfs4ksu/kernel_patches/5.4/susfs_v1.5.2_5.4.patch .
+          # Dung dau sao (*) de tu dong lụm phien ban patch moi nhat
+          cp susfs4ksu/kernel_patches/5.4/susfs_*.patch .
           cp susfs4ksu/kernel_patches/fs/susfs.c fs/
           cp susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-          patch -p1 < susfs_v1.5.2_5.4.patch || echo "Patch SUSFS thanh cong!"
+          patch -p1 < susfs_*.patch || true
 
       - name: 5. Tien hanh nau Kernel
         run: |
