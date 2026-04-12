@@ -20,6 +20,14 @@ jobs:
           cd kernel
           # Keo script chinh chu tu nha SukiSU-Ultra ve
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+          
+          # Fix loi sai ten thu muc cua JingMatrix:
+          # Tao duong dan ao (symlink) de lua he thong
+          cd drivers
+          if [ -d "KernelSU-Next" ]; then
+            ln -s KernelSU-Next kernelsu
+            echo "Da fix xong ten thu muc KernelSU!"
+          fi| bash -s main
 
       - name: 4. Tien hanh nau Kernel
         run: |
