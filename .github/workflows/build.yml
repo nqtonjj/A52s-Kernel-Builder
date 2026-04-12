@@ -15,13 +15,13 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra (Don rac SAU KHI cai)
+      - name: 3. Tich hop SukiSU-Ultra (Fix loi nhanh Github)
         run: |
           cd kernel
-          # B1: Cu cho no cai SukiSU-Ultra, ke no dung git stash hay gi
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+          # Bo chu 'main' o cuoi di, de script tu dong tim dung nhánh
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash
           
-          # B2: Cai xong roi thi xoa chet cai dong code cu cua JingMatrix (xoa chinh xac tuyet doi)
+          # Don sach dong code rac cua tac gia
           sed -i '/drivers\/kernelsu/d' drivers/Kconfig
           sed -i '/kernelsu\//d' drivers/Makefile
 
@@ -32,9 +32,9 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang-14
           
-          # Fix loi quet nham ban Han Quoc -> Chi quet dung ten a52sxq_defconfig
-          CONFIG_FILE=$(find arch/arm64/configs -type f -name "a52sxq_defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
-          echo "Da tim thay ban thiet ke quoc te xịn: $CONFIG_FILE"
+          # Radar mo rong: Quet toan bo defconfig cua A52s, loai tru ban Han Quoc (kor)
+          CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v "kor" | head -n 1 | sed 's|arch/arm64/configs/||')
+          echo "Da tim thay ban thiet ke quoc te: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
           make O=out -j$(nproc)
