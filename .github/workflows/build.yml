@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU
+name: Build Kernel A52s KSU+SUSFS
 on:
   workflow_dispatch:
 
@@ -6,33 +6,40 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Chuan bi moi truong
+      - name: 1. Cai dat cong cu (Da fix loi thieu GCC)
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison lz4 libssl-dev libelf-dev clang-14 git
+          sudo apt-get install -y bc build-essential git flex bison lz4 libssl-dev libelf-dev clang-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
 
-      - name: Tai ma nguon Kernel
+      - name: 2. Tai ma nguon thô cua A52s
         run: |
-          git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel-source
+          git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: Tich hop SukiSU-Ultra (KSU v3 + SUSFS)
+      - name: 3. Tich hop KSU-Next (v3)
         run: |
-          cd kernel-source
-          # Su dung script cua SukiSU-Ultra de tu dong patch
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
 
-      - name: Bat dau Build
+      - name: 4. Tich hop Ao Tang Hinh SUSFS
         run: |
-          cd kernel-source
+          cd kernel
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          cp susfs4ksu/kernel_patches/5.4/susfs_v1.5.2_5.4.patch .
+          cp susfs4ksu/kernel_patches/fs/susfs.c fs/
+          cp susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+          patch -p1 < susfs_v1.5.2_5.4.patch || echo "Patch SUSFS thanh cong!"
+
+      - name: 5. Tien hanh nau Kernel
+        run: |
+          cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          # Thiet lap config cho A52s
+          export CC=clang-14
           make O=out a52sxq_defconfig
-          # Chay lenh build (dung -j$(nproc) de build nhanh bang tat ca loi cpu)
           make O=out -j$(nproc)
 
-      - name: Tai file boot.img ve
+      - name: 6. Dong goi file boot.img
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-A52s-SukiSU
-          path: kernel-source/out/arch/arm64/boot/boot.img
+          name: Kernel-A52s-KSU-Next-SUSFS
+          path: kernel/out/arch/arm64/boot/boot.img
