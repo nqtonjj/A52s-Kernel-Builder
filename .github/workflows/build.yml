@@ -11,23 +11,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential git flex bison lz4 libssl-dev libelf-dev clang-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
 
-      - name: 2. Tai ma nguon cua JingMatrix
+      - name: 2. Tai ma nguon
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra (Dọn sach truoc khi build)
+      - name: 3. Tich hop SukiSU-Ultra (Don rac SAU KHI cai)
         run: |
           cd kernel
-          # B1: Xoa sach thu muc KSU cu cua tac gia
-          rm -rf drivers/kernelsu drivers/KernelSU
-          # B2: Quet va xoa sach moi dong code goi ten KSU cu trong ban thiet ke
-          sed -i '/kernelsu/d' drivers/Kconfig
-          sed -i '/KernelSU/d' drivers/Kconfig
-          sed -i '/kernelsu/d' drivers/Makefile
-          sed -i '/KernelSU/d' drivers/Makefile
-          
-          # B3: Sau khi nha cua da sach bong, moi tien hanh cai SukiSU-Ultra
+          # B1: Cu cho no cai SukiSU-Ultra, ke no dung git stash hay gi
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+          
+          # B2: Cai xong roi thi xoa chet cai dong code cu cua JingMatrix (xoa chinh xac tuyet doi)
+          sed -i '/drivers\/kernelsu/d' drivers/Kconfig
+          sed -i '/kernelsu\//d' drivers/Makefile
 
       - name: 4. Tien hanh nau Kernel
         run: |
@@ -36,9 +32,9 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang-14
           
-          # Robot quet tim ban thiet ke (Da hoat dong hoan hao)
-          CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*_defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
-          echo "Da tim thay ban thiet ke: $CONFIG_FILE"
+          # Fix loi quet nham ban Han Quoc -> Chi quet dung ten a52sxq_defconfig
+          CONFIG_FILE=$(find arch/arm64/configs -type f -name "a52sxq_defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
+          echo "Da tim thay ban thiet ke quoc te xịn: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
           make O=out -j$(nproc)
