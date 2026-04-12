@@ -1,4 +1,4 @@
-name: Build A52s Kernel KSU-Next + SUSFS
+name: Build Kernel A52s SukiSU
 on:
   workflow_dispatch:
 
@@ -6,41 +6,33 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Cài đặt công cụ build
+      - name: Chuan bi moi truong
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison lz4 libssl-dev libelf-dev clang-14
+          sudo apt-get install -y bc build-essential flex bison lz4 libssl-dev libelf-dev clang-14 git
 
-      - name: Tải mã nguồn Kernel A52s
+      - name: Tai ma nguon Kernel
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel-source
 
-      - name: Tích hợp KSU-Next (v3)
+      - name: Tich hop SukiSU-Ultra (KSU v3 + SUSFS)
         run: |
           cd kernel-source
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+          # Su dung script cua SukiSU-Ultra de tu dong patch
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
-      - name: Tích hợp SUSFS (Ẩn Root siêu sâu)
-        run: |
-          cd kernel-source
-          # Tải các file vá lỗi SUSFS cho bản kernel 5.4
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git
-          cp susfs4ksu/kernel_patches/5.4/susfs_v1.5.2_5.4.patch .
-          cp susfs4ksu/kernel_patches/fs/susfs.c fs/
-          cp susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-          # Chạy lệnh vá (patch)
-          patch -p1 < susfs_v1.5.2_5.4.patch
-
-      - name: Bắt đầu biên dịch (Build)
+      - name: Bat dau Build
         run: |
           cd kernel-source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
+          # Thiet lap config cho A52s
           make O=out a52sxq_defconfig
+          # Chay lenh build (dung -j$(nproc) de build nhanh bang tat ca loi cpu)
           make O=out -j$(nproc)
 
-      - name: Lưu trữ thành phẩm
+      - name: Tai file boot.img ve
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-A52s-KSU-Next-SUSFS
+          name: Kernel-A52s-SukiSU
           path: kernel-source/out/arch/arm64/boot/boot.img
