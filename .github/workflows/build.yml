@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU-Ultra (Saad)
+name: Build Kernel A52s SukiSU (Saad)
 on:
   workflow_dispatch:
 
@@ -13,13 +13,26 @@ jobs:
 
       - name: 2. Tai ma nguon (Nha saadelasfur)
         run: |
-          # Su dung ma nguon da duoc don dep sach se cua saadelasfur
-          git clone --depth=1 -b oneui-ksu https://github.com/saadelasfur/android_kernel_samsung_sm7325.git kernel
+          # BO cai -b oneui-ksu di! Tai thang nhanh mac dinh cua Saad
+          git clone --depth=1 https://github.com/saadelasfur/android_kernel_samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra (Khong can don rac nua)
+      - name: 3. Don rac KSU cu & Tich hop SukiSU-Ultra
         run: |
           cd kernel
-          # Kho da sach, chi viec goi SukiSU vao cai
+          # Buoc 1: Xoa sach KSU cu cua Saad
+          rm -rf drivers/kernelsu drivers/KernelSU-Next
+          sed -i '/kernelsu/d' drivers/Kconfig
+          sed -i '/KernelSU/d' drivers/Kconfig
+          sed -i '/kernelsu/d' drivers/Makefile
+          sed -i '/KernelSU/d' drivers/Makefile
+          
+          # Buoc 2: Chieu tro cua Phap Su -> Luu lai su sach se nay vao Git de setup.sh khong the "undo"
+          git config --global user.email "bot@example.com"
+          git config --global user.name "Bot"
+          git add .
+          git commit -m "Da don sach rac KSU cu" || true
+          
+          # Buoc 3: Bay gio moi goi SukiSU-Ultra vao cai dat. Du no co git stash cung vo dung!
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash
 
       - name: 4. Tien hanh nau Kernel
@@ -29,17 +42,21 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang-14
           
-          # Tim ban thiet ke quoc te
+          # Diet Werror tan goc
+          sed -i 's/-Werror=[^ ]*//g' Makefile
+          sed -i 's/-Werror=[^ ]*//g' scripts/Makefile.build
+          sed -i 's/ -Werror//g' Makefile
+          sed -i 's/ -Werror//g' scripts/Makefile.build
+          
+          # Tim ban thiet ke
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v "kor" | head -n 1 | sed 's|arch/arm64/configs/||')
           echo "Da tim thay ban thiet ke: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
-          
-          # Build binh thuong, khong can che logo Werror nua
-          make O=out -j$(nproc)
+          make O=out -j$(nproc) W=0
 
       - name: 5. Dong goi file thanh pham
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-A52s-SukiSU-Ultra-Saad
+          name: Kernel-A52s-SukiSU-Saad
           path: kernel/out/arch/arm64/boot/boot.img
