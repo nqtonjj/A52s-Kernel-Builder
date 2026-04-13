@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU (Saad - Final V3)
+name: Build Kernel A52s SukiSU (Saad - Final V4)
 on:
   workflow_dispatch:
 
@@ -18,11 +18,14 @@ jobs:
       - name: 3. Don rac KSU cu & Tich hop SukiSU-Ultra
         run: |
           cd kernel
+          # Xoa sach KSU cu cua Saad
           rm -rf drivers/kernelsu drivers/KernelSU drivers/KernelSU-Next
+          
+          # Sua loi Typo "than thanh": Da co dau cach dang hoang!
           sed -i '/kernelsu/d' drivers/Kconfig
           sed -i '/KernelSU/d' drivers/Kconfig
           sed -i '/kernelsu/d' drivers/Makefile
-          sed -i '/KernelSU/d'/drivers/Makefile
+          sed -i '/KernelSU/d' drivers/Makefile
           
           git config --global user.email "bot@example.com"
           git config --global user.name "Bot"
@@ -35,7 +38,7 @@ jobs:
         run: |
           cd kernel
           
-          # Tao duong tat (symlink)
+          # Symlinks cho Clang 14
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
           sudo ln -sf /usr/bin/ld.lld-14 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
@@ -49,17 +52,17 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           
-          # 2. DIỆT WERROR AN TOÀN (Pha xu ly the ky cua "ní" AI)
+          # Diet Werror an toan (Regex xin cua "ní" kia)
           find . -type f -name Makefile -o -name Kbuild -o -name "*.build" | xargs sed -i 's/-Werror[^ ,)]*//g' || true
           
-          # Tim ban thiet ke (Ne ban Han va Tau)
+          # Tim defconfig Quoc te
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
-          echo "Thuc thi voi config Quoc te xịn xò: $CONFIG_FILE"
+          echo "Dung ban thiet ke: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
           make O=out olddefconfig
           
-          # Vao viec thoi!
+          # Nau thuc su
           make O=out -j$(nproc --all) \
                LLVM=1 \
                LLVM_IAS=1 \
