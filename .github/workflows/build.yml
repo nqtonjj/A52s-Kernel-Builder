@@ -50,7 +50,7 @@ jobs:
           echo "=== Kiem tra drivers/Makefile ==="
           grep -i "kernelsu" drivers/Makefile || { echo "LOI: KernelSU chua duoc link vao Makefile!"; exit 1; }
 
-      - name: 5. Patch Code & Fix Loi Compile (GOD MODE)
+      - name: 5. Patch Code & Fix Loi Compile (GOD MODE + LINKER FIX)
         run: |
           cd kernel
 
@@ -82,24 +82,49 @@ jobs:
           mkdir -p out/include/uapi/media/
           cp -r techpack/camera/include/uapi/media/* out/include/uapi/media/ 2>/dev/null || true
           
+          echo "=== BẮT ĐẦU VÁ LỖI LINKER (undefined reference) ==="
+          # [LINKER FIX]: Ép thư mục camera phải biên dịch file cam_spi.c
+          # Lỗi này xảy ra do config thiếu hoặc driver OIS gọi hàm SPI nhưng SPI driver không được link.
+          CAM_SPI_MK="techpack/camera/drivers/cam_sensor_module/cam_spi/Makefile"
+          if [ -f "$CAM_SPI_MK" ]; then
+            echo "Tìm thấy Makefile của cam_spi. Tiến hành ép link..."
+            # Dù Kconfig có bật hay không, ta cứ ép nó biến thành Object file (.o) để linker tìm thấy hàm
+            sed -i 's/obj-$(CONFIG_SPECTRA_CAMERA) +=/obj-y +=/g' $CAM_SPI_MK
+          fi
+          
           echo "=== HOÀN TẤT CHẾ ĐỘ GOD MODE ==="
 
       - name: 6. Tien hanh nau Kernel (Config & Build)
         run: |
           cd kernel
 
-          # Dinh nghia args bien dich giong het nhau cho tat ca cac lenh make
-          MAKE_ARGS="O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-"
+          CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
+          echo "Dung config: $CONFIG_FILE"
+
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KPM=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KALLSYMS=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/$CONFIG_FILE
+          
+          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> arch/arm64/configs/$CONFIG_FILE
+          
+          # [LINKER FIX]: Đảm bảo cấu hình SPI của Camera luôn được bật
+          echo "CONFIG_SPECTRA_CAMERA=y" >> arch/arm64/configs/$CONFIG_FILE
+          echo "CONFIG_SPECTRA_CAMERA_SPI=y" >> arch/arm64/configs/$CONFIG_FILE
+
+          # Khai báo chuẩn mực Full LLVM Toolchain để tránh lỗi Atomics
+          MAKE_ARGS="O=out ARCH=arm64 CC=clang \
+                     LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf \
+                     CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-"
 
           make $MAKE_ARGS $CONFIG_FILE
           yes "" | make $MAKE_ARGS olddefconfig
-
-          # Xac nhan lai lan cuoi xem file config co nhan hay khong
-          echo "=== Kiem tra CONFIG quan trong ==="
-          for KEY in CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KPM CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL; do
-            val=$(grep "^${KEY}=" out/.config 2>/dev/null || echo "(khong duoc bat)")
-            echo "  $KEY = $val"
-          done
 
           echo ">> Bat dau build voi $(nproc --all) cores..."
           make -j$(nproc --all) $MAKE_ARGS \
