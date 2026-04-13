@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU (The Ultimate Masterpiece)
+name: Build Kernel A52s SukiSU (JingMatrix - V9 Khuat Phuc)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra (Logic cua Claude)
+      - name: 3. Tich hop SukiSU-Ultra
         run: |
           cd kernel
 
@@ -28,11 +28,9 @@ jobs:
           # Clone SukiSU-Ultra
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra drivers/kernelsu
 
-          # ==== Kiem tra cau truc thu muc thuc te ====
-          echo "=== Kiem tra cau truc SukiSU-Ultra ==="
-          ls drivers/kernelsu/
-          
-          # SukiSU-Ultra co Kconfig nam trong subfolder "kernel/" hay o ngoai?
+          # Kiem tra cau truc va moc vao build system
+          echo "=== Cau truc SukiSU-Ultra ===" && ls drivers/kernelsu/
+
           if [ -f "drivers/kernelsu/kernel/Kconfig" ]; then
             echo "Tim thay Kconfig tai kernel/Kconfig"
             echo 'source "drivers/kernelsu/kernel/Kconfig"' >> drivers/Kconfig
@@ -42,9 +40,7 @@ jobs:
             echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
             echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           else
-            echo "KHONG TIM THAY Kconfig! Liet ke thu muc:"
-            find drivers/kernelsu -name "Kconfig" -o -name "Makefile" | head -20
-            exit 1
+            echo "KHONG TIM THAY Kconfig!" && find drivers/kernelsu -name "Kconfig" | head -20 && exit 1
           fi
 
       - name: 4. Tien hanh nau Kernel
@@ -64,17 +60,22 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-          # Bùa hộ mệnh của Gemini: Cắt đứt Werror từ gốc rễ Makefile
-          sed -i 's/-Werror//g' Makefile || true
+          # ==== FIX LOI blk-mq.c:656 align-mismatch ====
+          # Clang 14 phat hien loi canh bao align trong blk-mq.c
+          # Cach 1: Patch truc tiep file de tat warning cho ham do
+          BLK_MQ="block/blk-mq.c"
+          if grep -q "smp_call_function_single_async" $BLK_MQ; then
+            echo "Patching blk-mq.c de tat Walign-mismatch..."
+            sed -i 's/#pragma GCC diagnostic ignored "-Wunused-variable"/#pragma GCC diagnostic ignored "-Wunused-variable"\n#pragma clang diagnostic ignored "-Walign-mismatch"/' $BLK_MQ || true
+            # Them pragma o dau file
+            sed -i '1s/^/#pragma clang diagnostic ignored "-Walign-mismatch"\n/' $BLK_MQ
+          fi
 
           # Tim config file
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
-          
-          # ==== Kiem tra CONFIG_FILE co tim duoc khong ====
+
           if [ -z "$CONFIG_FILE" ]; then
-            echo "KHONG TIM THAY defconfig! Liet ke cac config co san:"
-            ls arch/arm64/configs/ | grep a52
-            exit 1
+            echo "KHONG TIM THAY defconfig!" && ls arch/arm64/configs/ | grep a52 && exit 1
           fi
           echo "Thuc thi voi config: $CONFIG_FILE"
 
@@ -92,7 +93,7 @@ jobs:
                LLVM_IAS=1 \
                CLANG_TRIPLE=aarch64-linux-gnu- \
                KBUILD_WERROR=0 \
-               KCFLAGS="-Wno-error" \
+               KCFLAGS="-Wno-error -Wno-align-mismatch" \
                W=0
 
       - name: 5. Dong goi file thanh pham
