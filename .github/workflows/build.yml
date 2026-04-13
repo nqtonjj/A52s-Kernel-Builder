@@ -46,8 +46,12 @@ jobs:
         run: |
           cd kernel
           
-          # Fix 1: Thay the pgtable.h bang mm.h cho KernelSU
-          find KernelSU -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' {} + || true
+          # Xac dinh vi tri defconfig de tranh loi wildcard
+          REAL_DEFCONFIG=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1)
+          echo "Vá file config: $REAL_DEFCONFIG"
+
+          # Fix 1: Thay the pgtable.h bang mm.h cho KernelSU (Doi duong dan sang drivers/kernelsu)
+          find drivers/kernelsu -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' {} + || true
 
           # Fix 2: Sua loi kernel-doc xt_quota2.c
           if [ -f "net/netfilter/xt_quota2.c" ]; then
@@ -64,24 +68,27 @@ jobs:
           fi
           
           # Fix 4: Samsung specific (Tat Knox/DEFEX)
-          sed -i 's/CONFIG_KNOX_KAP=y/CONFIG_KNOX_KAP=n/g' arch/arm64/configs/*a52sxq*defconfig || true
-          sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' arch/arm64/configs/*a52sxq*defconfig || true
+          if [ -n "$REAL_DEFCONFIG" ]; then
+            sed -i 's/CONFIG_KNOX_KAP=y/CONFIG_KNOX_KAP=n/g' "$REAL_DEFCONFIG" || true
+            sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' "$REAL_DEFCONFIG" || true
+          fi
 
           # Fix 5: Bo qua loi copy thieu tham so cua Samsung Techpack Camera BANG CACH AN TOAN (-n)
           find techpack/camera -name "Makefile" -type f -exec sed -i 's/cp $(camera_adaptive_mipi)/cp -n $(camera_adaptive_mipi)/g' {} + || true
 
-          # Fix 9: Define SECCOMP_ARCH_NATIVE_NR
-          find KernelSU -type f -name "seccomp_cache.c" -exec sed -i '1i #include <linux/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif' {} + || true
+          # Fix 9: Define SECCOMP_ARCH_NATIVE_NR (Sua duong dan sang drivers/kernelsu)
+          find drivers/kernelsu -type f -name "seccomp_cache.c" -exec sed -i '1i #include <linux/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif' {} + || true
 
           # Fix 12: Khac phuc loi thieu Header cho ham put_task_struct
-          find KernelSU -type f -name "allowlist.c" -exec sed -i '1i #include <linux/sched/task.h>' {} + || true
+          find drivers/kernelsu -type f -name "allowlist.c" -exec sed -i '1i #include <linux/sched/task.h>' {} + || true
 
           # Fix 13: Tro dung Kbuild Include Path de fix loi uapi/supercall.h cho KPM
-          echo 'ccflags-y += -I$(srctree)/$(src)/..' >> KernelSU/kpm/Makefile
+          if [ -f "drivers/kernelsu/kpm/Makefile" ]; then
+            echo 'ccflags-y += -I$(srctree)/$(src)/..' >> drivers/kernelsu/kpm/Makefile
+          fi
 
           # [BỔ SUNG TỪ LOG TRƯỚC] Fix 14: FSNotify (Kernel 5.4 compatibility)
-          # Kernel 5.4 dùng handle_event thay vì handle_inode_event
-          find KernelSU -type f -name "*.c" -exec grep -l "handle_inode_event" {} + | while IFS= read -r f; do
+          find drivers/kernelsu -type f -name "*.c" -exec grep -l "handle_inode_event" {} + | while IFS= read -r f; do
             sed -i '1i int dummy_handle_event(void *a, void *b, void *c, void *d, void *e, void *f, void *g, void *h) { return 0; }' "$f"
             sed -i 's/\.handle_inode_event[[:space:]]*=[[:space:]]*[a-zA-Z0-9_]*/\.handle_event = (void *)dummy_handle_event/g' "$f"
           done
@@ -103,8 +110,7 @@ jobs:
           DEFCONFIG=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
           echo "Su dung: $DEFCONFIG"
 
-          # [THUC CHIEN MODE] Cat giam size, nguy trang rỗng, VAN GIU PRINTK de debug
-          # [PERFECTIONIST] Them KPROBES va MODULES dam bao KernelSU hoat dong 100% on dinh
+          # [THUC CHIEN MODE]
           scripts/config --file arch/arm64/configs/$DEFCONFIG \
             -e KSU \
             -e KSU_MANUAL_HOOK \
@@ -128,7 +134,6 @@ jobs:
           MAKE_ARGS="O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-"
 
           make $MAKE_ARGS $DEFCONFIG
-          # Resolve dependencies moi nhat sau khi them configs
           yes "" | make $MAKE_ARGS olddefconfig
           
           echo "DANG BUILD DA LUONG (-j$(nproc --all))..."
@@ -148,13 +153,11 @@ jobs:
       - name: 7. Dong goi AnyKernel3
         if: success()
         run: |
-          # [QUAN TRONG] Lột sạch bảng mã gỡ lỗi (Strip) an toan, khong cho phep fail step
           [ -f kernel/out/arch/arm64/boot/Image ] && \
           $GITHUB_WORKSPACE/clang/bin/llvm-strip kernel/out/arch/arm64/boot/Image || true
           
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           
-          # Copy vao AK3 sau khi da lột (neu thanh cong)
           cp kernel/out/arch/arm64/boot/Image AnyKernel3/
           cd AnyKernel3
           
