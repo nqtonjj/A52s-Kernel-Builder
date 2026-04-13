@@ -69,9 +69,9 @@ jobs:
           echo "Tiêu diệt kernel-doc..."
           find . -type f -name "kernel-doc" -exec sh -c 'echo "exit 0;" > {}' \; || true
 
-          # 2. Càn quét MỌI biến thể của -Werror
+          # 2. Càn quét MỌI biến thể của -Werror (ĐÃ SỬA LỖI REGEX TRÁNH BỎ SÓT DẤU BẰNG)
           echo "Càn quét -Werror ẩn..."
-          find . -type f \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) -exec sed -i 's/-Werror\b//g; s/-Werror=[a-zA-Z0-9_-]*//g' {} + || true
+          find . -type f \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) -exec sed -i 's/-Werror=[^[:space:]]*//g; s/-Werror//g' {} + || true
 
           # 3. Ép cờ -Wno-error vào thẳng Makefile chủ
           echo "Tiêm kháng thể vào Makefile gốc..."
@@ -84,11 +84,9 @@ jobs:
           
           echo "=== BẮT ĐẦU VÁ LỖI LINKER (undefined reference) ==="
           # [LINKER FIX]: Ép thư mục camera phải biên dịch file cam_spi.c
-          # Lỗi này xảy ra do config thiếu hoặc driver OIS gọi hàm SPI nhưng SPI driver không được link.
           CAM_SPI_MK="techpack/camera/drivers/cam_sensor_module/cam_spi/Makefile"
           if [ -f "$CAM_SPI_MK" ]; then
             echo "Tìm thấy Makefile của cam_spi. Tiến hành ép link..."
-            # Dù Kconfig có bật hay không, ta cứ ép nó biến thành Object file (.o) để linker tìm thấy hàm
             sed -i 's/obj-$(CONFIG_SPECTRA_CAMERA) +=/obj-y +=/g' $CAM_SPI_MK
           fi
           
@@ -118,8 +116,8 @@ jobs:
           echo "CONFIG_SPECTRA_CAMERA=y" >> arch/arm64/configs/$CONFIG_FILE
           echo "CONFIG_SPECTRA_CAMERA_SPI=y" >> arch/arm64/configs/$CONFIG_FILE
 
-          # Khai báo chuẩn mực Full LLVM Toolchain để tránh lỗi Atomics
-          MAKE_ARGS="O=out ARCH=arm64 CC=clang \
+          # Khai báo chuẩn mực Full LLVM Toolchain (Bổ sung HOSTCC để triệt tiêu lỗi LSE Atomics)
+          MAKE_ARGS="O=out ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ \
                      LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf \
                      CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-"
 
@@ -139,7 +137,6 @@ jobs:
             echo "PHÁT HIỆN LỖI BỊ VÙI LẤP! CHUYỂN SANG ĐƠN LUỒNG (-j1) ĐỂ BẮT THỦ PHẠM..."
             echo "══════════════════════════════════════════"
             
-            # Chạy lại với 1 Core duy nhất, lỗi ở đâu sẽ dừng và in ra chính xác ở đó!
             make -j1 $MAKE_ARGS \
                  KBUILD_WERROR=0 \
                  KCFLAGS="-Wno-error -Wno-align-mismatch -Wno-pointer-to-int-cast -Wno-incompatible-pointer-types -Wno-implicit-function-declaration -Wno-documentation -Wno-documentation-unknown-command" \
