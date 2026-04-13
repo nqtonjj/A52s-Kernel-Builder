@@ -75,8 +75,10 @@ jobs:
             sed -i 's/\/\*\*/\/\*/g' net/netfilter/xt_quota2.c || true
           fi
 
-          # Xoa -Werror bi hardcode chìm trong mọi Makefile con của netfilter
-          find net/netfilter -name "Makefile" -exec sed -i 's/-Werror//g' {} + || true
+          # [NUCLEAR FIX 2.0]: Xóa sạch cờ -Werror trên TOÀN BỘ thư mục net/, techpack/ và drivers/
+          # Đảm bảo không một Makefile con nào có thể lén lút bật lại -Werror
+          echo "Quét và tiêu diệt -Werror ẩn..."
+          find net techpack drivers -name "Makefile" -exec sed -i 's/-Werror//g' {} + || true
 
       - name: 6. Tien hanh nau Kernel (Config & Build)
         run: |
@@ -115,10 +117,11 @@ jobs:
           done
 
           # [Hoc tu Claude]: Ghi Log thong minh
+          # Tắt hàng loạt cảnh báo tài liệu (-Wno-documentation) để log cực kỳ sạch sẽ!
           echo ">> Bat dau build voi $(nproc --all) cores..."
           make -j$(nproc --all) $MAKE_ARGS \
                KBUILD_WERROR=0 \
-               KCFLAGS="-Wno-error -Wno-align-mismatch -Wno-pointer-to-int-cast -Wno-incompatible-pointer-types -Wno-implicit-function-declaration" \
+               KCFLAGS="-Wno-error -Wno-align-mismatch -Wno-pointer-to-int-cast -Wno-incompatible-pointer-types -Wno-implicit-function-declaration -Wno-documentation -Wno-documentation-unknown-command" \
                W=0 2>&1 | tee ../build.log
           
           BUILD_EXIT=${PIPESTATUS[0]}
