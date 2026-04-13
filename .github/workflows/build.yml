@@ -27,6 +27,11 @@ jobs:
           rm -rf drivers/kernelsu drivers/KernelSU drivers/KernelSU-Next KernelSU
           sed -i '/[kK]ernel[sS][uU]/d' drivers/Kconfig drivers/Makefile || true
 
+          # [FIX ĐỘT PHÁ]: Chốt sổ (Commit) việc dọn dẹp để setup.sh KHÔNG THỂ undo qua lệnh git stash
+          git config --global user.email "bot@github.com"
+          git config --global user.name "GitHub Action"
+          git commit -am "Xoa sach KSU cu cua JingMatrix de tranh xung dot" || true
+
           # [Hoc tu Claude]: Dung script setup.sh chinh thuc voi nhanh susfs-main de triet loi "pathspec main"
           echo "Dang chay SukiSU setup.sh..."
           curl -LSs "https://raw.githubusercontent.com/sukisu-ultra/sukisu-ultra/main/kernel/setup.sh" | bash -s susfs-main
@@ -43,9 +48,13 @@ jobs:
           # [Giu lai tu Ta]: Xoa -Werror bi hardcode trong thu muc net/netfilter/Makefile
           sed -i 's/-Werror//g' net/netfilter/Makefile || true
 
-          # Fix chung cho pgtable.h cua KSU (Quet dung thu muc KernelSU moi tao sau lenh setup.sh)
-          find KernelSU drivers/kernelsu -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null | xargs grep -l "linux/pgtable.h" 2>/dev/null | while read f; do
-            sed -i 's|#include <linux/pgtable.h>|#include <linux/mm.h>|g' "$f"
+          # Fix chung cho pgtable.h cua KSU (An toan hon, tranh bao loi thu muc khong ton tai)
+          for DIR in KernelSU drivers/kernelsu; do
+            if [ -d "$DIR" ]; then
+              find "$DIR" -type f \( -name "*.c" -o -name "*.h" \) -print0 | xargs -0 grep -l "linux/pgtable.h" 2>/dev/null | while IFS= read -r f; do
+                sed -i 's|#include <linux/pgtable.h>|#include <linux/mm.h>|g' "$f"
+              done
+            fi
           done || true
 
       - name: 5. Tien hanh nau Kernel (Config & Build)
