@@ -69,7 +69,7 @@ jobs:
           echo "Tiêu diệt kernel-doc..."
           find . -type f -name "kernel-doc" -exec sh -c 'echo "exit 0;" > {}' \; || true
 
-          # 2. Càn quét MỌI biến thể của -Werror (SỬA LỖI REGEX XÓA NHẦM DẤU NGOẶC)
+          # 2. Càn quét MỌI biến thể của -Werror
           # Chỉ xóa các ký tự không phải là dấu cách, tab, dấu phẩy, hoặc dấu ngoặc đóng
           echo "Càn quét -Werror ẩn..."
           find . -type f \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) -exec sed -i 's/-Werror=[^ \t,)]*//g; s/-Werror//g' {} + || true
@@ -94,9 +94,16 @@ jobs:
             echo "KHÔNG tìm thấy supercall.h! KPM sẽ bị tắt để an toàn."
           fi
 
+          echo "=== BẮT ĐẦU VÁ LỖI SECCOMP CACHE ==="
+          # [SECCOMP FIX]: Kernel 5.4 thiếu SECCOMP_ARCH_NATIVE_NR, ta tiêm thẳng số 1024 vào đầu file.
+          SECCOMP_CACHE="drivers/kernelsu/infra/seccomp_cache.c"
+          if [ -f "$SECCOMP_CACHE" ]; then
+            echo "Vá lỗi undeclared identifier SECCOMP_ARCH_NATIVE_NR..."
+            sed -i '1s;^;#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR 1024\n#endif\n;' "$SECCOMP_CACHE"
+          fi
+
           echo "=== BẮT ĐẦU VÁ LỖI LINKER (DUMMY FILE) ==="
           # [LINKER FIX]: Tạo một file giả mạo chứa các hàm SPI rỗng để đánh lừa Linker
-          # Vì Samsung đã xoá mất file header gốc nên ta không thể ép compile file thật.
           cat << 'EOF' > techpack/camera/drivers/cam_sensor_module/cam_ois/dummy_spi.c
           int cam_spi_query_id(void) { return 0; }
           int cam_spi_write(void) { return 0; }
