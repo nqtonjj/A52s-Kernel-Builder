@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU (JingMatrix - V12 Toi Thuong)
+name: Build Kernel A52s SukiSU (JingMatrix - V9 Khuat Phuc)
 
 on:
   workflow_dispatch:
@@ -32,7 +32,8 @@ jobs:
           echo "=== Kiem tra cau truc SukiSU-Ultra ==="
           ls drivers/kernelsu/
           
-          # SukiSU-Ultra co Kconfig nam trong subfolder "kernel/" hay root?
+          # SukiSU-Ultra co Kconfig nam trong subfolder "kernel/"
+          # Nen phai tro source vao dung duong dan
           if [ -f "drivers/kernelsu/kernel/Kconfig" ]; then
             echo "Tim thay Kconfig tai kernel/Kconfig"
             echo 'source "drivers/kernelsu/kernel/Kconfig"' >> drivers/Kconfig
@@ -81,6 +82,7 @@ jobs:
           if [ -f "$HFI" ]; then
             echo "Patching hfi_iris2.c: fix pointer-to-int cast..."
             # Them flag tat warning cast nay cho file nay
+            # Cach an toan: patch Makefile cua vidc de add CFLAGS cho file nay
             VIDC_MK="techpack/video/msm/vidc/Makefile"
             if [ -f "$VIDC_MK" ]; then
               echo 'CFLAGS_hfi_iris2.o += -Wno-pointer-to-int-cast' >> "$VIDC_MK"
@@ -94,9 +96,6 @@ jobs:
             echo "Patching blk-mq.c de tat Walign-mismatch..."
             sed -i '1s/^/#pragma clang diagnostic ignored "-Walign-mismatch"\n/' $BLK_MQ
           fi
-          
-          # ==== BUA 4: Cắt Werror ở root Makefile để an toàn tuyệt đối ====
-          sed -i 's/-Werror//g' Makefile || true
 
           # Tim config file
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
