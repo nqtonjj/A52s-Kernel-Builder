@@ -102,8 +102,12 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> arch/arm64/configs/$CONFIG_FILE
           echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> arch/arm64/configs/$CONFIG_FILE
 
-          make O=out ARCH=arm64 $CONFIG_FILE
-          yes "" | make O=out ARCH=arm64 olddefconfig
+          # [FIX QUAN TRONG TU LOG]: Dinh nghia args bien dich giong het nhau cho tat ca cac lenh make
+          MAKE_ARGS="O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-"
+
+          # Truyen bien Clang ngay tu khi tao config de khong bi dung man hinh hoi (y/n)
+          make $MAKE_ARGS $CONFIG_FILE
+          yes "" | make $MAKE_ARGS olddefconfig
 
           # [Hoc tu Claude]: Xac nhan lai lan cuoi xem file config co nhan hay khong
           echo "=== Kiem tra CONFIG quan trong ==="
@@ -114,14 +118,7 @@ jobs:
 
           # [Hoc tu Claude]: Ghi Log thong minh
           echo ">> Bat dau build voi $(nproc --all) cores..."
-          make O=out -j$(nproc --all) \
-               ARCH=arm64 \
-               CC="clang" \
-               CROSS_COMPILE=aarch64-linux-gnu- \
-               CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-               LLVM=1 \
-               LLVM_IAS=1 \
-               CLANG_TRIPLE=aarch64-linux-gnu- \
+          make -j$(nproc --all) $MAKE_ARGS \
                KBUILD_WERROR=0 \
                KCFLAGS="-Wno-error -Wno-align-mismatch -Wno-pointer-to-int-cast -Wno-incompatible-pointer-types -Wno-implicit-function-declaration" \
                W=0 2>&1 | tee ../build.log
