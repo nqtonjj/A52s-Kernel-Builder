@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU (JingMatrix - V7 Vo Cuc)
+name: Build Kernel A52s SukiSU (JingMatrix - V8 Ultimate)
 on:
   workflow_dispatch:
 
@@ -15,26 +15,34 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra (Chap het git stash)
+      - name: 3. Don rac KSU cu & Tich hop SukiSU-Ultra
         run: |
           cd kernel
           
-          # Cu de KSU cu do, goi SukiSU vao cai de no muon lam gi thi lam
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash || true
+          # Don sach cai KSU cu rich nam trong muc drivers cua JingMatrix
+          rm -rf drivers/kernelsu drivers/KernelSU drivers/KernelSU-Next
           
-          # SAU KHI CAI XONG: Chém đứt gốc cái "kernelsu" chữ thường của JingMatrix
+          # Xoa triet de cac dong goi KSU cu trong file cua drivers
           sed -i '/kernelsu/d' drivers/Kconfig
+          sed -i '/KernelSU/d' drivers/Kconfig
           sed -i '/kernelsu/d' drivers/Makefile
+          sed -i '/KernelSU/d' drivers/Makefile
           
-          # TU TAY them lại duong dan chuan "KernelSU" chu hoa cho SukiSU
-          # Kiem tra neu chua co thi moi them de tranh trung lap
-          grep -q "KernelSU" drivers/Kconfig || echo 'source "drivers/KernelSU/Kconfig"' >> drivers/Kconfig
-          grep -q "KernelSU" drivers/Makefile || echo 'obj-$(CONFIG_KSU) += KernelSU/' >> drivers/Makefile
+          # Chot so khong cho phuc hoi (khoa mom git stash cua setup.sh)
+          git config --global user.email "bot@example.com"
+          git config --global user.name "Bot"
+          git add .
+          git commit -m "Da don rac KSU" || true
+          
+          # Cai SukiSU vao. No se tu tao thu muc "KernelSU" o ngoai cung va tu link code.
+          # (Da xoa bo may dong "echo" ngu ngoc cua toi o phien ban truoc)
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash || true
 
       - name: 4. Tien hanh nau Kernel
         run: |
           cd kernel
           
+          # Duong tat cho Clang
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
           sudo ln -sf /usr/bin/ld.lld-14 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
@@ -48,19 +56,14 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           
-          # Chi sua Makefile goc de bit mom Werror
-          sed -i 's/-Werror//g' Makefile || true
-          
-          # Tim defconfig Quoc te
+          # Tim ban thiet ke cua nha JingMatrix (Quoc te)
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
-          echo "Thuc thi voi config: $CONFIG_FILE"
+          echo "Thuc thi voi config Quoc te: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
-          
-          # Bi kip nha Phat: Tu dong Enter
           yes "" | make O=out olddefconfig
           
-          # FULL GIAP: LLVM + Tat canh bao Loi
+          # Phap thuat toi thuong: Ep dung LLVM va bit mom Werror bang bien moi truong
           make O=out -j$(nproc --all) \
                LLVM=1 \
                LLVM_IAS=1 \
@@ -74,5 +77,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Kernel-A52s-SukiSU-JingMatrix-Image
-          # Bi kip thu 2: Hot het Image hoac Image.gz
           path: kernel/out/arch/arm64/boot/Image*
