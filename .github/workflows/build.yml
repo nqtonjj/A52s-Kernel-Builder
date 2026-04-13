@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    # [Hoc tu Claude]: Pin phien ban Ubuntu 22.04 de on dinh moi truong Clang
+    # Pin phien ban Ubuntu 22.04 de on dinh moi truong Clang
     runs-on: ubuntu-22.04
 
     steps:
@@ -19,34 +19,45 @@ jobs:
           # Nhanh nay cua JingMatrix da co san manual hooks trong fs/
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra (Theo tieu chuan SukiSU)
+      # [Hoc tu Claude]: Tach rieng buoc Toolchain de de quan ly
+      - name: 3. Lien ket Toolchain Clang 14
+        run: |
+          sudo ln -sf /usr/bin/clang-14        /usr/bin/clang
+          sudo ln -sf /usr/bin/ld.lld-14       /usr/bin/ld.lld
+          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-ar-14      /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-nm-14      /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-strip-14   /usr/bin/llvm-strip
+          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-readelf-14 /usr/bin/llvm-readelf
+          clang --version | head -1
+
+      - name: 4. Tich hop SukiSU-Ultra (Theo tieu chuan SukiSU)
         run: |
           cd kernel
           
-          # Don dep sa lon (Fix case-insensitive tu Claude)
+          # Don dep sa lon
           rm -rf drivers/kernelsu drivers/KernelSU drivers/KernelSU-Next KernelSU
           sed -i '/[kK]ernel[sS][uU]/d' drivers/Kconfig drivers/Makefile || true
 
-          # [FIX ĐỘT PHÁ]: Chốt sổ (Commit) việc dọn dẹp để setup.sh KHÔNG THỂ undo qua lệnh git stash
+          # [FIX ĐỘT PHÁ CỦA CHÚNG TA]: Chốt sổ (Commit) việc dọn dẹp để setup.sh KHÔNG THỂ undo qua lệnh git stash
           git config --global user.email "bot@github.com"
           git config --global user.name "GitHub Action"
           git commit -am "Xoa sach KSU cu cua JingMatrix de tranh xung dot" || true
 
-          # [Hoc tu Claude]: Dung script setup.sh chinh thuc voi nhanh susfs-main de triet loi "pathspec main"
+          # Dung script setup.sh chinh thuc voi nhanh susfs-main
           echo "Dang chay SukiSU setup.sh..."
           curl -LSs "https://raw.githubusercontent.com/sukisu-ultra/sukisu-ultra/main/kernel/setup.sh" | bash -s susfs-main
 
-      - name: 4. Patch Code & Fix Loi Compile (Bat buoc tu Log)
+          # [Hoc tu Claude]: Kiem tra cheo (Cross-check) de bat loi som
+          echo "=== Kiem tra drivers/Kconfig ==="
+          grep -i "kernelsu" drivers/Kconfig || { echo "LOI: KernelSU chua duoc link vao Kconfig!"; exit 1; }
+          echo "=== Kiem tra drivers/Makefile ==="
+          grep -i "kernelsu" drivers/Makefile || { echo "LOI: KernelSU chua duoc link vao Makefile!"; exit 1; }
+
+      - name: 5. Patch Code & Fix Loi Compile
         run: |
           cd kernel
-
-          # [Giu lai tu Ta]: Fix loi doc-syntax gay ngat build o netfilter
-          echo "Patching xt_quota2.c..."
-          sed -i 's/\* @lock:/* lock:/g' net/netfilter/xt_quota2.c || true
-          sed -i 's/\* @name:/* name:/g' net/netfilter/xt_quota2.c || true
-
-          # [Giu lai tu Ta]: Xoa -Werror bi hardcode trong thu muc net/netfilter/Makefile
-          sed -i 's/-Werror//g' net/netfilter/Makefile || true
 
           # Fix chung cho pgtable.h cua KSU (An toan hon, tranh bao loi thu muc khong ton tai)
           for DIR in KernelSU drivers/kernelsu; do
@@ -57,19 +68,21 @@ jobs:
             fi
           done || true
 
-      - name: 5. Tien hanh nau Kernel (Config & Build)
+          # [Hoc tu Claude]: Fix loi doc-syntax gay ngat build o netfilter (Mo rong them @quota va @hits)
+          echo "Patching xt_quota2.c..."
+          if [ -f "net/netfilter/xt_quota2.c" ]; then
+            sed -i 's/\* @lock:/* lock:/g'   net/netfilter/xt_quota2.c || true
+            sed -i 's/\* @name:/* name:/g'   net/netfilter/xt_quota2.c || true
+            sed -i 's/\* @quota:/* quota:/g' net/netfilter/xt_quota2.c || true
+            sed -i 's/\* @hits:/* hits:/g'   net/netfilter/xt_quota2.c || true
+          fi
+
+          # Xoa -Werror bi hardcode trong thu muc net/netfilter/Makefile
+          sed -i 's/-Werror//g' net/netfilter/Makefile || true
+
+      - name: 6. Tien hanh nau Kernel (Config & Build)
         run: |
           cd kernel
-
-          # Symlinks toolchain
-          sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
-          sudo ln -sf /usr/bin/ld.lld-14 /usr/bin/ld.lld
-          sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
-          sudo ln -sf /usr/bin/llvm-ar-14 /usr/bin/llvm-ar
-          sudo ln -sf /usr/bin/llvm-nm-14 /usr/bin/llvm-nm
-          sudo ln -sf /usr/bin/llvm-strip-14 /usr/bin/llvm-strip
-          sudo ln -sf /usr/bin/llvm-objdump-14 /usr/bin/llvm-objdump
-          sudo ln -sf /usr/bin/llvm-readelf-14 /usr/bin/llvm-readelf
 
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
           echo "Dung config: $CONFIG_FILE"
@@ -92,7 +105,15 @@ jobs:
           make O=out ARCH=arm64 $CONFIG_FILE
           yes "" | make O=out ARCH=arm64 olddefconfig
 
-          # Build voi cac co an toan tuyet doi
+          # [Hoc tu Claude]: Xac nhan lai lan cuoi xem file config co nhan hay khong
+          echo "=== Kiem tra CONFIG quan trong ==="
+          for KEY in CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KPM CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL; do
+            val=$(grep "^${KEY}=" out/.config 2>/dev/null || echo "(khong duoc bat)")
+            echo "  $KEY = $val"
+          done
+
+          # [Hoc tu Claude]: Ghi Log thong minh
+          echo ">> Bat dau build voi $(nproc --all) cores..."
           make O=out -j$(nproc --all) \
                ARCH=arm64 \
                CC="clang" \
@@ -103,25 +124,47 @@ jobs:
                CLANG_TRIPLE=aarch64-linux-gnu- \
                KBUILD_WERROR=0 \
                KCFLAGS="-Wno-error -Wno-align-mismatch -Wno-pointer-to-int-cast -Wno-incompatible-pointer-types -Wno-implicit-function-declaration" \
-               W=0
+               W=0 2>&1 | tee ../build.log
+          
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ "$BUILD_EXIT" -ne 0 ]; then
+            echo ""
+            echo "══════════════════════════════════════════"
+            echo "BUILD THAT BAI - 100 DONG LOG CUOI:"
+            echo "══════════════════════════════════════════"
+            tail -100 ../build.log
+            exit 1
+          fi
 
-      - name: 6. Dong goi voi AnyKernel3 (Ho tro Un1ca ROM)
+      - name: 7. Dong goi voi AnyKernel3 (Ho tro Un1ca ROM)
         if: success()
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cd AnyKernel3
           
           # Toi uu block cho AnyKernel
-          sed -i 's/kernel.string=.*/kernel.string=SukiSU-Ultra A52s/g' AnyKernel3/anykernel.sh
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
-          sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=auto;|g' AnyKernel3/anykernel.sh
+          sed -i 's/kernel.string=.*/kernel.string=SukiSU-Ultra A52s/g' anykernel.sh
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=auto;|g' anykernel.sh
           
-          cp kernel/out/arch/arm64/boot/Image AnyKernel3/
-          cd AnyKernel3
+          # [Hoc tu Claude]: Tu dong nhan dien duoi file mo rong
+          cp ../kernel/out/arch/arm64/boot/Image .
+          [ -f ../kernel/out/arch/arm64/boot/Image.gz ] && cp ../kernel/out/arch/arm64/boot/Image.gz .
+          [ -f ../kernel/out/arch/arm64/boot/Image.gz-dtb ] && cp ../kernel/out/arch/arm64/boot/Image.gz-dtb .
+          
           zip -r9 ../Kernel-A52s-SukiSU-Un1ca.zip * -x '*.git*' -x 'README.md'
 
-      - name: 7. Upload thanh pham Flashable Zip
+      - name: 8. Upload thanh pham Flashable Zip
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Kernel-A52s-SukiSU-Un1ca-Flashable
           path: Kernel-A52s-SukiSU-Un1ca.zip
+
+      # [Hoc tu Claude]: Upload log de de dang chan doan neu chet
+      - name: 9. Upload Build Log (chi khi that bai)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-debug
+          path: build.log
