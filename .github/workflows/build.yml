@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU (Saad - Final)
+name: Build Kernel A52s SukiSU (Saad - Final V2)
 on:
   workflow_dispatch:
 
@@ -9,7 +9,6 @@ jobs:
       - name: 1. Cai dat cong cu
         run: |
           sudo apt-get update
-          # Them lld-14 va llvm-14 vao doi hinh de build LLVM=1
           sudo apt-get install -y bc build-essential git flex bison lz4 libssl-dev libelf-dev clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
 
       - name: 2. Tai ma nguon (Nha saadelasfur)
@@ -36,7 +35,7 @@ jobs:
         run: |
           cd kernel
           
-          # Tao duong tat (symlink) de lừa con robot nhu "ní" kia chi dan
+          # Tao duong tat (symlink)
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
           sudo ln -sf /usr/bin/ld.lld-14 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
@@ -50,15 +49,23 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           
-          # Diet Werror
-          find . -type f -name Makefile -o -name Kbuild -o -name "*.build" | xargs sed -i 's/-Werror//g' || true
+          # Diet Werror tan goc theo y cua "ní" AI
+          find . -type f -name Makefile -o -name Kbuild -o -name "*.build" | xargs sed -i 's/-Werror[^ ]*//g' || true
           
-          # Tim ban thiet ke
-          CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v "kor" | head -n 1 | sed 's|arch/arm64/configs/||')
-          echo "Thuc thi voi config: $CONFIG_FILE"
+          # Tim ban thiet ke: Ne ban Han (kor) va ban Tau/Dai Loan (chn)
+          CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
+          echo "Thuc thi voi config Quoc te: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
-          make O=out -j$(nproc --all) LLVM=1 LLVM_IAS=1 W=0
+          
+          # Phap thuat: Ep tra loi mac dinh cho moi cau hoi (nhu LTO) de robot khong bi dung hinh
+          make O=out olddefconfig
+          
+          make O=out -j$(nproc --all) \
+               LLVM=1 \
+               LLVM_IAS=1 \
+               CLANG_TRIPLE=aarch64-linux-gnu- \
+               W=0
 
       - name: 5. Dong goi file thanh pham (Image.gz)
         if: success()
