@@ -12,7 +12,7 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           sudo -E apt-get update -qq
-          sudo -E apt-get install -y bc build-essential git flex bison lz4 libssl-dev libelf-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu cpio python3 python3-pip zstd rsync zip curl
+          sudo -E apt-get install -y bc build-essential git flex bison lz4 libssl-dev libelf-dev clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu cpio python3 python3-pip zstd rsync zip curl
 
       - name: 2. Tai Toolchain (Proton Clang)
         run: |
@@ -52,52 +52,61 @@ jobs:
           grep -q "KernelSU/" drivers/Makefile || \
           echo 'obj-$(CONFIG_KSU) += KernelSU/' >> drivers/Makefile
 
-          # 6. Xac minh ton tai
+          # 6. Xac minh ton tai cua file Kconfig
           test -f drivers/KernelSU/Kconfig || {
             echo "❌ CRITICAL: KernelSU Kconfig missing after link!"
+            ls -la drivers/KernelSU/
             exit 1
           }
           echo "✅ KernelSU core verified!"
 
-      - name: 5. Fix loi ma nguon (Hardened Surgical Patching)
+      - name: 5. Fix loi ma nguon (God-Tier Surgical Patching)
         run: |
           cd kernel
           
-          # Tim defconfig thuc te (Adaptive & Verified)
-          DEFCONFIG_PRIMARY="a52sxq_defconfig"
-          FULL_DEFCONFIG_PATH=$(find arch/arm64/configs -name "$DEFCONFIG_PRIMARY" | head -n 1)
-          [ -z "$FULL_DEFCONFIG_PATH" ] && FULL_DEFCONFIG_PATH=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1)
-          echo ">> Vá file config: $FULL_DEFCONFIG_PATH"
+          # [DETERMINISTIC DEFCONFIG SELECTION]
+          FULL_DEFCONFIG_PATH=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "chn" -e "kor" | head -n 1)
+          if [ -z "$FULL_DEFCONFIG_PATH" ]; then
+            FULL_DEFCONFIG_PATH=$(find arch/arm64/configs -name "*a52s*defconfig" | head -n 1)
+          fi
+          echo ">> Vá file config tai: $FULL_DEFCONFIG_PATH"
 
-          # Fix 1: Backport pgtable.h
+          # Fix 1: Backport pgtable.h (Dung grep guard)
           grep -rl "<linux/pgtable.h>" KernelSU | xargs -r sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g'
 
           # Fix 2: Samsung special kernel-doc
           [ -f "net/netfilter/xt_quota2.c" ] && sed -i 's/\* @lock:/* lock:/g; s/\* @name:/* name:/g; s/\* @quota:/* quota:/g; s/\* @hits:/* hits:/g' net/netfilter/xt_quota2.c
 
-          # Fix 3: Tat -Werror dien rong (De bao ve tien trinh build)
+          # Fix 3: Tat -Werror dien rong (Bao ve tien trinh build)
           find . -type f \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) -exec sed -i 's/-Werror=[^ \t,)]*//g; s/-Werror//g' {} + || true
           
           # Fix 4: Samsung specific (Tat Knox/DEFEX)
           sed -i 's/CONFIG_KNOX_KAP=y/CONFIG_KNOX_KAP=n/g; s/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' "$FULL_DEFCONFIG_PATH" || true
 
-          # Fix 5: Firmware camera techpack
-          find techpack/camera -name "Makefile" -type f -exec sed -i 's/cp $(camera_adaptive_mipi)/cp -n $(camera_adaptive_mipi)/g' {} + || true
+          # Fix 5: Firmware camera techpack (cp -n)
+          find techpack/camera -name "Makefile" -type f -exec sed -i 's/cp $(camera_adaptive_mipi)/[ -n "$(camera_adaptive_mipi)" ] \&\& cp -n $(camera_adaptive_mipi)/g' {} + || true
 
-          # Fix 9: SECCOMP constants cho Kernel 5.4
+          # Fix 9: SECCOMP constants
           find KernelSU -type f -name "seccomp_cache.c" -exec sed -i '1i #include <linux/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif' {} + || true
 
-          # Fix 12: Header task.h
-          find KernelSU -type f -name "allowlist.c" -exec sed -i '1i #include <linux/sched/task.h>' {} + || true
-
-          # Fix 13: KPM Supercall Fix (Copy de dam bao 100% include thanh cong)
+          # =====================================================================
+          # FIX 14 & 12 (GOD-TIER): ÉP COMPILER TỰ HIỂU TWA_RESUME
+          # =====================================================================
+          echo ">> Injecting TWA_RESUME=0 via Kbuild..."
+          grep -q "DTWA_RESUME" drivers/KernelSU/Makefile || echo 'ccflags-y += -DTWA_RESUME=0' >> drivers/KernelSU/Makefile
+          
+          # Dung --follow-symlinks de sed khong can dut link
+          sed -i --follow-symlinks '1i #include <linux/sched/task.h>' drivers/KernelSU/allowlist.c || true
+          
+          # Fix 13: KPM Include Path (Su dung --follow-symlinks bao ve link)
           mkdir -p KernelSU/kernel/kpm/uapi
           find KernelSU -name "supercall.h" -exec cp {} KernelSU/kernel/kpm/uapi/supercall.h \; || true
+          # =====================================================================
 
-          # [BỔ SUNG THỰC CHIẾN] Fix 14: FSNotify Compatibility (Loi handle_inode_event)
-          find KernelSU -type f -name "*.c" -exec grep -l "handle_inode_event" {} + | while IFS= read -r f; do
-            sed -i '1i int dummy_handle_event(void *a, void *b, void *c, void *d, void *e, void *f, void *g, void *h) { return 0; }' "$f"
-            sed -i 's/\.handle_inode_event[[:space:]]*=[[:space:]]*[a-zA-Z0-9_]*/\.handle_event = (void *)dummy_handle_event/g' "$f"
+          # [BỔ SUNG THỰC CHIẾN] Fix 14: FSNotify Compatibility (Loi handle_inode_event tren Kernel 5.4)
+          find drivers/KernelSU -type f -name "*.c" -exec grep -l "handle_inode_event" {} + | while IFS= read -r f; do
+            sed -i --follow-symlinks '1i int dummy_handle_event(void *a, void *b, void *c, void *d, void *e, void *f, void *g, void *h) { return 0; }' "$f"
+            sed -i --follow-symlinks 's/\.handle_inode_event[[:space:]]*=[[:space:]]*[a-zA-Z0-9_]*/\.handle_event = (void *)dummy_handle_event/g' "$f"
           done
 
           # [BỔ SUNG THỰC CHIẾN] Fix 15: OIS Linker Dummy (Tranh loi phut 60)
@@ -113,20 +122,24 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           cd kernel
           
-          FULL_DEFCONFIG_PATH=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1)
-          DEFCONFIG=$(basename $FULL_DEFCONFIG_PATH)
+          FULL_DEFCONFIG_PATH=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "chn" -e "kor" | head -n 1)
+          DEFCONFIG=$(echo "$FULL_DEFCONFIG_PATH" | sed 's|arch/arm64/configs/||')
+          echo ">> Su dung defconfig: $DEFCONFIG"
 
-          # Perfectionist Config
-          scripts/config --file "$FULL_DEFCONFIG_PATH" \
+          MAKE_ARGS="O=out ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
+
+          # 1. Chay make defconfig de tao ra out/.config
+          make $MAKE_ARGS "$DEFCONFIG"
+          
+          # 2. Inject config vao out/.config (Chuan Architect de khong bi KPM override)
+          scripts/config --file out/.config \
             -e KSU -e KSU_MANUAL_HOOK -e KPM -e KALLSYMS -d KALLSYMS_ALL \
             -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
             -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT \
             -e SECTION_MISMATCH_WARN_ONLY -d DEBUG_INFO -e KPROBES -e HAVE_KPROBES -e MODULES \
             --set-str LOCALVERSION ""
 
-          MAKE_ARGS="O=out ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
-
-          make $MAKE_ARGS "$DEFCONFIG"
+          # 3. Olddefconfig chot so
           yes "" | make $MAKE_ARGS olddefconfig
           
           echo ">> Starting Production Build..."
@@ -142,10 +155,17 @@ jobs:
             exit 1
           fi
 
-          # [DOUBLE VERIFICATION]
-          echo ">> Verifying binary integrity..."
-          nm out/vmlinux | grep -E "ksu_handle_setuid|kpm_init" || { echo "❌ ERROR: Hooks missing!"; exit 1; }
-          echo "✅ Integrity Verified!"
+          # [LEVEL 10/10] DOUBLE VERIFICATION IN BINARY
+          echo ">> Verifying KSU & KPM Hooks in vmlinux..."
+          nm out/vmlinux | grep -q "ksu_handle_setuid" || {
+            echo "❌ ERROR: KSU hooks not found in binary!"
+            exit 1
+          }
+          nm out/vmlinux | grep -q "kpm_init" || {
+            echo "❌ ERROR: KPM symbols not found!"
+            exit 1
+          }
+          echo "✅ KSU & KPM Hooks verified!"
 
       - name: 7. Dong goi AnyKernel3
         if: success()
