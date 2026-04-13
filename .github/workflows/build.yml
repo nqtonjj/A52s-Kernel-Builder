@@ -1,4 +1,5 @@
 name: Build Kernel A52s SukiSU (JingMatrix - V9 Khuat Phuc)
+
 on:
   workflow_dispatch:
 
@@ -15,27 +16,42 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra (THU CONG CHUAN XAC 100%)
+      - name: 3. Tich hop SukiSU-Ultra
         run: |
           cd kernel
-          
-          # Xoa sach KSU rac
+
+          # Xoa sach KSU cu
           rm -rf drivers/kernelsu drivers/KernelSU drivers/KernelSU-Next
           sed -i '/[kK]ernel[sS][uU]/d' drivers/Kconfig
           sed -i '/[kK]ernel[sS][uU]/d' drivers/Makefile
-          
-          # TU TAY tai SukiSU-Ultra vao dung thu muc drivers/kernelsu (Viet Thuong!)
+
+          # Clone SukiSU-Ultra
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra drivers/kernelsu
+
+          # ==== FIX CHINH: Kiem tra cau truc thu muc thuc te ====
+          echo "=== Kiem tra cau truc SukiSU-Ultra ==="
+          ls drivers/kernelsu/
           
-          # Tu tay "Moc" duong dan vao he thong build cua Linux
-          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          # SukiSU-Ultra co Kconfig nam trong subfolder "kernel/"
+          # Nen phai tro source vao dung duong dan
+          if [ -f "drivers/kernelsu/kernel/Kconfig" ]; then
+            echo "Tim thay Kconfig tai kernel/Kconfig"
+            echo 'source "drivers/kernelsu/kernel/Kconfig"' >> drivers/Kconfig
+            echo 'obj-$(CONFIG_KSU) += kernelsu/kernel/' >> drivers/Makefile
+          elif [ -f "drivers/kernelsu/Kconfig" ]; then
+            echo "Tim thay Kconfig tai root"
+            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          else
+            echo "KHONG TIM THAY Kconfig! Liet ke thu muc:"
+            find drivers/kernelsu -name "Kconfig" -o -name "Makefile" | head -20
+            exit 1
+          fi
 
       - name: 4. Tien hanh nau Kernel
         run: |
           cd kernel
-          
-          # Duong tat cho Clang 14
+
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
           sudo ln -sf /usr/bin/ld.lld-14 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
@@ -48,18 +64,28 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          
-          # Tim ban thiet ke
+
+          # Tim config file
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
-          echo "Thuc thi voi config Quoc te: $CONFIG_FILE"
           
-          # Bat cong tac KSU trong ban thiet ke
+          # ==== FIX: Kiem tra CONFIG_FILE co tim duoc khong ====
+          if [ -z "$CONFIG_FILE" ]; then
+            echo "KHONG TIM THAY defconfig! Liet ke cac config co san:"
+            ls arch/arm64/configs/ | grep a52
+            exit 1
+          fi
+          echo "Thuc thi voi config: $CONFIG_FILE"
+
+          # Bat KSU
           echo "CONFIG_KSU=y" >> arch/arm64/configs/$CONFIG_FILE
-          
-          make O=out $CONFIG_FILE
-          yes "" | make O=out olddefconfig
-          
+
+          make O=out ARCH=arm64 $CONFIG_FILE
+          yes "" | make O=out ARCH=arm64 olddefconfig
+
           make O=out -j$(nproc --all) \
+               ARCH=arm64 \
+               CROSS_COMPILE=aarch64-linux-gnu- \
+               CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                LLVM=1 \
                LLVM_IAS=1 \
                CLANG_TRIPLE=aarch64-linux-gnu- \
