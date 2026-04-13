@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU (Saad - Final V2)
+name: Build Kernel A52s SukiSU (Saad - Final V3)
 on:
   workflow_dispatch:
 
@@ -22,7 +22,7 @@ jobs:
           sed -i '/kernelsu/d' drivers/Kconfig
           sed -i '/KernelSU/d' drivers/Kconfig
           sed -i '/kernelsu/d' drivers/Makefile
-          sed -i '/KernelSU/d' drivers/Makefile
+          sed -i '/KernelSU/d'/drivers/Makefile
           
           git config --global user.email "bot@example.com"
           git config --global user.name "Bot"
@@ -49,18 +49,17 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           
-          # Diet Werror tan goc theo y cua "ní" AI
-          find . -type f -name Makefile -o -name Kbuild -o -name "*.build" | xargs sed -i 's/-Werror[^ ]*//g' || true
+          # 2. DIỆT WERROR AN TOÀN (Pha xu ly the ky cua "ní" AI)
+          find . -type f -name Makefile -o -name Kbuild -o -name "*.build" | xargs sed -i 's/-Werror[^ ,)]*//g' || true
           
-          # Tim ban thiet ke: Ne ban Han (kor) va ban Tau/Dai Loan (chn)
+          # Tim ban thiet ke (Ne ban Han va Tau)
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
-          echo "Thuc thi voi config Quoc te: $CONFIG_FILE"
+          echo "Thuc thi voi config Quoc te xịn xò: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
-          
-          # Phap thuat: Ep tra loi mac dinh cho moi cau hoi (nhu LTO) de robot khong bi dung hinh
           make O=out olddefconfig
           
+          # Vao viec thoi!
           make O=out -j$(nproc --all) \
                LLVM=1 \
                LLVM_IAS=1 \
