@@ -83,6 +83,17 @@ jobs:
           mkdir -p out/include/uapi/media/
           cp -r techpack/camera/include/uapi/media/* out/include/uapi/media/ 2>/dev/null || true
           
+          echo "=== BẮT ĐẦU VÁ LỖI KPM (supercall.h) ==="
+          # [KPM FIX]: Copy uapi/supercall.h vào đúng thư mục kpm để tránh lỗi file not found
+          SUPERCALL_PATH=$(find drivers/kernelsu -name "supercall.h" | head -n 1)
+          if [ -n "$SUPERCALL_PATH" ]; then
+            echo "Tìm thấy supercall.h tại $SUPERCALL_PATH. Đang vá lỗi..."
+            mkdir -p drivers/kernelsu/kpm/uapi
+            cp "$SUPERCALL_PATH" drivers/kernelsu/kpm/uapi/
+          else
+            echo "KHÔNG tìm thấy supercall.h! KPM sẽ bị tắt để an toàn."
+          fi
+
           echo "=== BẮT ĐẦU VÁ LỖI LINKER (DUMMY FILE) ==="
           # [LINKER FIX]: Tạo một file giả mạo chứa các hàm SPI rỗng để đánh lừa Linker
           # Vì Samsung đã xoá mất file header gốc nên ta không thể ép compile file thật.
@@ -106,7 +117,15 @@ jobs:
 
           echo "CONFIG_KSU=y" >> arch/arm64/configs/$CONFIG_FILE
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/arm64/configs/$CONFIG_FILE
-          echo "CONFIG_KPM=y" >> arch/arm64/configs/$CONFIG_FILE
+          
+          # Bat KPM an toan
+          if [ -f "drivers/kernelsu/kpm/uapi/supercall.h" ]; then
+            echo "CONFIG_KPM=y" >> arch/arm64/configs/$CONFIG_FILE
+          else
+            echo "# CONFIG_KPM is not set" >> arch/arm64/configs/$CONFIG_FILE
+            sed -i 's/CONFIG_KPM=y/# CONFIG_KPM is not set/g' drivers/kernelsu/Kconfig 2>/dev/null || true
+          fi
+
           echo "CONFIG_KALLSYMS=y" >> arch/arm64/configs/$CONFIG_FILE
           echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/$CONFIG_FILE
           
