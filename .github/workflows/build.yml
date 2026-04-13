@@ -15,10 +15,9 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra (Fix loi nhanh Github)
+      - name: 3. Tich hop SukiSU-Ultra
         run: |
           cd kernel
-          # Bo chu 'main' o cuoi di, de script tu dong tim dung nhánh
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash
           
           # Don sach dong code rac cua tac gia
@@ -32,16 +31,16 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CC=clang-14
           
-          # Tat che do "Canh bao la Giet" (Werror) cuc doan cua Samsung
-          sed -i 's/-Werror//g' Makefile
-          sed -i 's/-Werror//g' scripts/Makefile.build
+          # Nho co phai nho tan goc (Xoa sach -Werror va moi cai duoi an theo)
+          sed -i 's/-Werror=[^ ]*//g' Makefile
+          sed -i 's/-Werror=[^ ]*//g' scripts/Makefile.build
+          sed -i 's/ -Werror//g' Makefile
+          sed -i 's/ -Werror//g' scripts/Makefile.build
           
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v "kor" | head -n 1 | sed 's|arch/arm64/configs/||')
           echo "Da tim thay ban thiet ke quoc te: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
-          
-          # Them W=0 de bit mom cai cờ Warning
           make O=out -j$(nproc) W=0
 
       - name: 5. Dong goi file thanh pham
