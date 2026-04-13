@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU (Saad - Final V5)
+name: Build Kernel A52s SukiSU (JingMatrix - Hoan Hao)
 on:
   workflow_dispatch:
 
@@ -11,33 +11,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential git flex bison lz4 libssl-dev libelf-dev clang-14 lld-14 llvm-14 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu
 
-      - name: 2. Tai ma nguon
+      - name: 2. Tai ma nguon (Chinh chu JingMatrix)
         run: |
-          git clone --depth=1 https://github.com/saadelasfur/android_kernel_samsung_sm7325.git kernel
+          # Về lại nhà JingMatrix, dung nhanh oneui-ksu goc!
+          git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Don rac KSU & Tich hop SukiSU-Ultra
+      - name: 3. Tich hop SukiSU-Ultra
         run: |
           cd kernel
+          
+          # Don sach cai KSU cu rich ma JingMatrix cai vao
           rm -rf drivers/kernelsu drivers/KernelSU drivers/KernelSU-Next
           
-          # Sửa lỗi typo chuẩn (đã có dấu cách)
+          # Sua dung chuan de khong hong file
           sed -i '/kernelsu/d' drivers/Kconfig
           sed -i '/KernelSU/d' drivers/Kconfig
           sed -i '/kernelsu/d' drivers/Makefile
           sed -i '/KernelSU/d' drivers/Makefile
           
+          # Chot so khong cho phuc hoi
           git config --global user.email "bot@example.com"
           git config --global user.name "Bot"
           git add .
-          git commit -m "Clean KSU" || true
+          git commit -m "Da don rac KSU" || true
           
+          # Cai SukiSU vao
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash || true
 
       - name: 4. Tien hanh nau Kernel
         run: |
           cd kernel
           
-          # Symlinks cho Clang 14
+          # Duong tat cho Clang
           sudo ln -sf /usr/bin/clang-14 /usr/bin/clang
           sudo ln -sf /usr/bin/ld.lld-14 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-objcopy-14 /usr/bin/llvm-objcopy
@@ -51,17 +56,14 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           
-          # Chi sua Makefile goc nhe nhang (khong dung find de tranh be file con)
-          sed -i 's/-Werror//g' Makefile || true
-          
-          # Tim defconfig Quoc te
-          CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
-          echo "Su dung config: $CONFIG_FILE"
+          # Tim ban thiet ke cua nha JingMatrix
+          CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v "kor" | head -n 1 | sed 's|arch/arm64/configs/||')
+          echo "Thuc thi voi config Quoc te: $CONFIG_FILE"
           
           make O=out $CONFIG_FILE
           make O=out olddefconfig
           
-          # DÙNG KCFLAGS ĐỂ TẮT WERROR MÀ KHÔNG LÀM HỎNG FILE
+          # Phap thuat toi thuong: Ep dung LLVM va bit mom Werror
           make O=out -j$(nproc --all) \
                LLVM=1 \
                LLVM_IAS=1 \
@@ -69,9 +71,9 @@ jobs:
                KCFLAGS="-Wno-error" \
                W=0
 
-      - name: 5. Dong goi Image.gz
+      - name: 5. Dong goi file thanh pham
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-A52s-SukiSU-Saad-Image
+          name: Kernel-A52s-SukiSU-JingMatrix-Image
           path: kernel/out/arch/arm64/boot/Image.gz
