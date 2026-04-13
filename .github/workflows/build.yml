@@ -6,6 +6,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    env:
+      # CC được tách riêng để tránh lỗi shell splitting (Dấu cách trong MAKE_ARGS)
+      CC: "ccache clang"
 
     steps:
       - name: 1. Cài đặt công cụ (Enterprise Optimized)
@@ -19,25 +22,27 @@ jobs:
         with:
           path: clang
           key: clang-proton-stable-v1
+          restore-keys: |
+            clang-proton-stable-
 
-      - name: 2.1 Quản lý Cache Ccache (Dữ liệu biên dịch)
+      - name: 2.1 Quản lý Cache Ccache (Reusable)
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-kernel-v2-${{ runner.os }}-${{ github.run_id }}
+          key: ccache-kernel-v1-${{ runner.os }}
           restore-keys: |
-            ccache-kernel-v2-${{ runner.os }}-
+            ccache-kernel-v1-${{ runner.os }}-
 
       - name: 2.2 Setup Toolchain & Ccache Tuning
         run: |
-          # Sử dụng Proton Clang qua git clone để tránh lỗi 404 (Exit code 8)
+          # Sử dụng Proton Clang để tránh lỗi 404 (Exit code 8)
           if [ ! -d "clang/bin" ]; then
             rm -rf clang
             git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
           fi
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
           
-          # Tối ưu hóa Ccache tối thượng
+          # Tối ưu hóa Ccache tối thượng cho GitHub Actions
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> $GITHUB_ENV
           echo "CCACHE_COMPILERCHECK=content" >> $GITHUB_ENV
           echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
@@ -47,27 +52,31 @@ jobs:
 
       - name: 3. Tải mã nguồn Kernel (True Determinism)
         run: |
-          # Clone và pin SHA để đảm bảo build không bao giờ drift
+          # Clone JingMatrix SM7325
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
           cd kernel
           git rev-parse HEAD > ../kernel_commit.txt
 
-      - name: 4. Tích hợp SukiSU-Ultra (Kiến trúc chuẩn - Fix Fatal)
+      - name: 4. Tích hợp SukiSU-Ultra (Kiến trúc chuẩn CI/CD)
         run: |
           cd kernel
-          # Làm sạch triệt để repo
+          # Làm sạch repo triệt để
           git clean -fdx drivers/ KernelSU/ out/ || true
           rm -rf drivers/KernelSU drivers/kernelsu KernelSU
           sed -i '/kernelsu/I d' drivers/Kconfig drivers/Makefile || true
 
-          # Clone và Pin commit SukiSU-Ultra (149f65fa)
+          # Clone và Pin commit SukiSU (149f65fa)
           git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
           cd KernelSU && git checkout 149f65fa && cd ..
 
           echo ">> Running SukiSU setup.sh..."
           bash KernelSU/kernel/setup.sh || { echo "❌ setup.sh failed!"; exit 1; }
+          
+          # Đảm bảo KernelSU được include vào cây build (MANDATORY HOOK)
+          grep -q "KernelSU" drivers/Makefile || echo "obj-y += KernelSU/" >> drivers/Makefile
+          grep -q "KernelSU" drivers/Kconfig || sed -i '/endmenu/i source "drivers/KernelSU/Kconfig"' drivers/Kconfig
 
-      - name: 5. Vá lỗi mã nguồn (Elite Surgical Patching)
+      - name: 5. Vá lỗi mã nguồn (Deep Security Killing & Surgical Patching)
         run: |
           cd kernel
           
@@ -77,56 +86,58 @@ jobs:
           # Fix 2: Netfilter -Werror
           [ -f net/netfilter/Makefile ] && sed -i 's/-Werror//g' net/netfilter/Makefile
 
-          # Fix 3: SECCOMP constants (Dùng printf + cat để tránh lỗi escape n của sed)
+          # Fix 3: SECCOMP constants (Sử dụng printf để chuẩn GNU sed)
           find KernelSU -name seccomp_cache.c | while read f; do
             printf '#include <linux/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif\n' \
               | cat - "$f" > /tmp/_sec.c && mv /tmp/_sec.c "$f"
           done
 
-          # Fix 4: allowlist.c (Idempotent - FIX LỖI SED DELIMITER TRÊN LOG)
+          # Fix 4: allowlist.c (Idempotent - Sửa lỗi Sed delimiter)
           ALLOWLIST="KernelSU/kernel/allowlist.c"
           if [ -f "$ALLOWLIST" ]; then
             echo ">> Surgical patching $ALLOWLIST..."
-            # Sử dụng cơ chế grep -v (Lọc bỏ) để sạch tuyệt đối, không lo lỗi cú pháp sed
             grep -v "linux/sched.h" "$ALLOWLIST" | grep -v "linux/cred.h" | grep -v "linux/task_work.h" | grep -v "linux/sched/signal.h" | grep -v "TWA_RESUME" | grep -v "put_task_struct" > "$ALLOWLIST.tmp"
-            
-            # Tiêm Header chuẩn vào đầu file
             printf '#include <linux/sched/signal.h>\n#include <linux/sched.h>\n#include <linux/cred.h>\n#include <linux/task_work.h>\n#ifndef TWA_RESUME\n#define TWA_RESUME 0\n#endif\n' > "$ALLOWLIST"
-            cat "$ALLOWLIST.tmp" >> "$ALLOWLIST"
-            rm "$ALLOWLIST.tmp"
+            cat "$ALLOWLIST.tmp" >> "$ALLOWLIST" && rm "$ALLOWLIST.tmp"
           fi
 
-          # Fix 5: Camera adaptive mipi (Comment-out để tránh lỗi Make expand)
+          # Fix 5: Camera adaptive mipi (Comment-out để tránh lỗi Make)
           find techpack/camera -name Makefile -type f -exec sed -i '/camera_adaptive_mipi/s/^/#/' {} +
 
-          # Fix 6: Fake perflog.h (Dùng dấu | làm delimiter an toàn nhất)
+          # Fix 6: Fake perflog.h
           mkdir -p include/linux/log
           printf '#ifndef _LINUX_PERFLOG_H\n#define _LINUX_PERFLOG_H\nstatic inline void perf_log_printk(const char *fmt, ...) {}\n#endif\n' > include/linux/log/perflog.h
           grep -rl --include="*.c" --include="*.h" "perflog.h" kernel/ drivers/ fs/ 2>/dev/null | xargs -r sed -i 's|perflog.h|linux/log/perflog.h|g' || true
 
-          # Fix 7: Hard Patch Defconfig (Triệt hạ Samsung Security)
-          DEFCONFIG_PATH=$(find arch/arm64/configs -name "*a52*defconfig" | head -n 1)
-          if [ -f "$DEFCONFIG_PATH" ]; then
-            echo ">> Hard patching security in $DEFCONFIG_PATH"
-            sed -i 's/CONFIG_SECURITY_KNOX=y/# CONFIG_SECURITY_KNOX is not set/g' $DEFCONFIG_PATH
-            sed -i 's/CONFIG_SECURITY_DEFEX=y/# CONFIG_SECURITY_DEFEX is not set/g' $DEFCONFIG_PATH
-            sed -i 's/CONFIG_SECURITY_RKP=y/# CONFIG_SECURITY_RKP is not set/g' $DEFCONFIG_PATH
-            sed -i 's/CONFIG_PROCA=y/# CONFIG_PROCA is not set/g' $DEFCONFIG_PATH
-            sed -i 's/CONFIG_FIVE=y/# CONFIG_FIVE is not set/g' $DEFCONFIG_PATH
-          fi
+          # Fix 7: Killing Samsung Security (Deep source patch - Chống treo logo)
+          echo ">> Killing Samsung Security..."
+          grep -rl "defex" security/ | xargs -r sed -i 's/return -EPERM/return 0/g' || true
+          grep -rl "rkp" security/ | xargs -r sed -i 's/enabled = 1/enabled = 0/g' || true
+          grep -rl "proca" security/ | xargs -r sed -i 's/return -1/return 0/g' || true
+          grep -rl "tima" security/ | xargs -r sed -i 's/return -EPERM/return 0/g' || true
 
-      - name: 6. Cấu hình & Biên dịch (High-Efficiency Engine)
+      - name: 6. Cấu hình & Biên dịch (SMART DEFCONFIG DETECTION)
         run: |
           cd kernel
-          # Tìm defconfig
-          REL_DEFCONFIG=$(ls arch/arm64/configs/*a52sxq*defconfig 2>/dev/null | head -n1 | xargs basename || true)
-          [ -z "$REL_DEFCONFIG" ] && REL_DEFCONFIG=$(grep -l "CONFIG_ARCH_SM7325" arch/arm64/configs/* | head -n1 | xargs basename)
           
-          # Sử dụng mảng KARGS để tránh shell splitting lỗi CC="ccache clang"
+          # Tìm defconfig thông minh, bỏ qua thư mục, chỉ lấy file
+          echo ">> Detecting defconfig..."
+          REL_DEFCONFIG=$(find arch/arm64/configs -type f -name "*a52sxq*defconfig" -printf "%f\n" | head -n 1)
+          if [ -z "$REL_DEFCONFIG" ]; then
+            REL_DEFCONFIG=$(find arch/arm64/configs -type f -name "*defconfig" | grep -iE "a52|sm7325" | head -n 1 | xargs -r basename)
+          fi
+          if [ -z "$REL_DEFCONFIG" ]; then
+            REL_DEFCONFIG=$(grep -rl "CONFIG_ARCH_SM7325" arch/arm64/configs --include="*defconfig" 2>/dev/null | head -n 1 | xargs -r basename)
+          fi
+          
+          [ -z "$REL_DEFCONFIG" ] && { echo "❌ ERROR: No valid defconfig found!"; exit 1; }
+          echo ">> Target Defconfig: $REL_DEFCONFIG"
+
+          # Sử dụng mảng để tránh shell splitting lỗi CC="ccache clang"
           KARGS=(
             O=out
             ARCH=arm64
-            CC="ccache clang"
+            CC="${{ env.CC }}"
             LD=ld.lld
             LLVM=1
             LLVM_IAS=1
@@ -135,10 +146,9 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu-
           )
 
-          echo ">> Building Target: $REL_DEFCONFIG"
           make "${KARGS[@]}" "$REL_DEFCONFIG"
           
-          # Inject config flags
+          # Tắt bảo mật tại defconfig
           if [ -f "scripts/config" ]; then
             ./scripts/config --file out/.config \
               -e KSU -e KSU_MANUAL_HOOK -e KPM -e KALLSYMS -d KALLSYMS_ALL \
@@ -156,25 +166,32 @@ jobs:
           export KBUILD_BUILD_USER=ci
           export KBUILD_BUILD_HOST=github
           
-          # Chạy build, để lại 1 core cho hệ thống điều phối
-          if ! make -j$(nproc --ignore=1) "${KARGS[@]}" KCFLAGS="-Wno-error" KBUILD_WERROR=0; then
-            echo "❌ BUILD FAILED! Extracting errors..."
+          # Biên dịch chính thức + Smart Error Logging
+          # Build Image và Image.gz-dtb (Thường dùng cho Samsung)
+          if ! make -j$(nproc --ignore=1) "${KARGS[@]}" KCFLAGS="-Wno-error" KBUILD_WERROR=0 Image.gz-dtb Image; then
+            echo "❌❌❌ BUILD THẤT BẠI! ĐANG TRÍCH XUẤT LỖI TRỰC TIẾP DƯỚI ĐÂY ❌❌❌"
             make -j1 "${KARGS[@]}" 2>&1 | tee ../build.log
+            echo "==================== SMART ERROR LOG ===================="
             grep -i -C 5 "error:" ../build.log | tail -n 100
+            echo "========================================================="
             exit 1
           fi
 
       - name: 7. Đóng gói AnyKernel3 (Safe Release)
         if: success()
         run: |
+          # Kiểm tra các tệp đầu ra quan trọng
           IMG="kernel/out/arch/arm64/boot/Image"
+          GZDTB="kernel/out/arch/arm64/boot/Image.gz-dtb"
           [ -f "$IMG" ] || { echo "❌ Image missing!"; exit 1; }
           
+          # Sử dụng fork AnyKernel3 chuẩn cho SM7325
           git clone --depth=1 --single-branch --branch master https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          cp "$IMG" AnyKernel3/
-          cd AnyKernel3
           
-          # Cấu hình AnyKernel3
+          cp "$IMG" AnyKernel3/
+          [ -f "$GZDTB" ] && cp "$GZDTB" AnyKernel3/ || echo ">> Image.gz-dtb missing, using plain Image."
+          
+          cd AnyKernel3
           sed -i 's/kernel.string=.*/kernel.string=SukiSU-Ultra A52s (Elite Stealth)/g' anykernel.sh
           sed -i 's/do.devicecheck=.*/do.devicecheck=1/g' anykernel.sh
           sed -i 's/device.name1=.*/device.name1=a52sxq/g' anykernel.sh
@@ -203,10 +220,9 @@ jobs:
           tag_name: build-${{ github.sha }}
           name: SukiSU Ultra - A52s (Build ${{ github.run_number }})
           body: |
-            ### 🚀 Production Kernel Build Successfully
-            - **Device**: Samsung Galaxy A52s (a52sxq)
-            - **Kernel**: 5.4.x (JingMatrix SM7325)
+            ### 🚀 Production Kernel Successfully Built
+            - **Device**: Samsung A52s (a52sxq)
             - **Root**: SukiSU Ultra (149f65fa)
-            - **Security**: KNOX/DEFEX Disabled
-            - **CI Run ID**: `${{ github.sha }}`
+            - **Security**: Hard Patched (Disabled)
+            - **CI Run**: #${{ github.run_number }}
           files: Kernel-A52s-SukiSU-Elite.zip
