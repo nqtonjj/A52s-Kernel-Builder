@@ -1,4 +1,4 @@
-name: Build Kernel A52s SukiSU (JingMatrix - V9 Khuat Phuc)
+name: Build Kernel A52s SukiSU (The Ultimate Masterpiece)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 3. Tich hop SukiSU-Ultra
+      - name: 3. Tich hop SukiSU-Ultra (Logic cua Claude)
         run: |
           cd kernel
 
@@ -28,12 +28,11 @@ jobs:
           # Clone SukiSU-Ultra
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra drivers/kernelsu
 
-          # ==== FIX CHINH: Kiem tra cau truc thu muc thuc te ====
+          # ==== Kiem tra cau truc thu muc thuc te ====
           echo "=== Kiem tra cau truc SukiSU-Ultra ==="
           ls drivers/kernelsu/
           
-          # SukiSU-Ultra co Kconfig nam trong subfolder "kernel/"
-          # Nen phai tro source vao dung duong dan
+          # SukiSU-Ultra co Kconfig nam trong subfolder "kernel/" hay o ngoai?
           if [ -f "drivers/kernelsu/kernel/Kconfig" ]; then
             echo "Tim thay Kconfig tai kernel/Kconfig"
             echo 'source "drivers/kernelsu/kernel/Kconfig"' >> drivers/Kconfig
@@ -65,10 +64,13 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
+          # Bùa hộ mệnh của Gemini: Cắt đứt Werror từ gốc rễ Makefile
+          sed -i 's/-Werror//g' Makefile || true
+
           # Tim config file
           CONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | grep -v -e "kor" -e "chn" | head -n 1 | sed 's|arch/arm64/configs/||')
           
-          # ==== FIX: Kiem tra CONFIG_FILE co tim duoc khong ====
+          # ==== Kiem tra CONFIG_FILE co tim duoc khong ====
           if [ -z "$CONFIG_FILE" ]; then
             echo "KHONG TIM THAY defconfig! Liet ke cac config co san:"
             ls arch/arm64/configs/ | grep a52
