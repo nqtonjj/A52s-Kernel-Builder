@@ -24,26 +24,25 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 4. Tich hop SukiSU-Ultra (Pin Version)
+      - name: 4. Tich hop SukiSU-Ultra (Deterministic Hybrid Integration)
         run: |
           cd kernel
           
-          # Don dep sach se truoc khi setup
+          # 1. Don dep sach se de tranh duplicate neu rerun
           rm -rf drivers/kernelsu drivers/KernelSU drivers/KernelSU-Next KernelSU
-          sed -i '/kernelsu/d' drivers/Kconfig
-          sed -i '/kernelsu/d' drivers/Makefile
+          sed -i '/kernelsu/d' drivers/Kconfig drivers/Makefile || true
 
-          # Clone truc tiep SukiSU-Ultra de quan ly phien ban (Commit 149f65fa)
+          # 2. Clone SukiSU-Ultra voi commit on dinh nhat (149f65fa)
           git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
-          cd KernelSU
-          git checkout 149f65fa || true
-          cd ..
+          cd KernelSU && git checkout 149f65fa && cd ..
 
-          # Chay setup.sh chinh thuc
-          echo "Dang chay SukiSU setup.sh..."
-          bash KernelSU/kernel/setup.sh susfs-main
+          # 3. Chay setup.sh (Tu dong lien ket vao drivers/kernelsu)
+          bash KernelSU/kernel/setup.sh susfs-main || {
+            echo "❌ CRITICAL: setup.sh failed!"
+            exit 1
+          }
 
-      - name: 5. Fix loi ma nguon (Safe Surgical Patching)
+      - name: 5. Fix loi ma nguon (Advanced Surgical Patching)
         run: |
           cd kernel
           
@@ -51,21 +50,22 @@ jobs:
           REAL_DEFCONFIG=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1)
           echo "Vá file config: $REAL_DEFCONFIG"
 
-          # [KPM FIX]: Vá lỗi supercall.h bằng cách copy trực tiếp vào kpm/uapi (Bền vững hơn)
+          # [KPM FIX]: Vi include path -I thuong xuyen bi Kbuild phớt lờ, ta copy truc tiep cho chac chan
           mkdir -p drivers/kernelsu/kpm/uapi
           SUPERCALL_SRC=$(find drivers/kernelsu -name "supercall.h" | head -n 1)
           [ -n "$SUPERCALL_SRC" ] && cp "$SUPERCALL_SRC" drivers/kernelsu/kpm/uapi/supercall.h
 
-          # [SECCOMP FIX]: Dùng NR_syscalls cho Kernel 5.4
+          # [SECCOMP FIX]: Backport SECCOMP_ARCH_NATIVE_NR cho Kernel 5.4
           find drivers/kernelsu -type f -name "seccomp_cache.c" -exec sed -i '1i #include <linux/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif' {} + || true
 
           # [FSNOTIFY FIX]: Kernel 5.4 compatibility (Giai quyet loi handle_inode_event)
+          # Dung (void *) cast de Proton Clang khong bat be kieu du lieu
           find drivers/kernelsu -type f -name "*.c" -exec grep -l "handle_inode_event" {} + | while IFS= read -r f; do
             sed -i '1i int dummy_handle_event(void *a, void *b, void *c, void *d, void *e, void *f, void *g, void *h) { return 0; }' "$f"
             sed -i 's/\.handle_inode_event[[:space:]]*=[[:space:]]*[a-zA-Z0-9_]*/\.handle_event = (void *)dummy_handle_event/g' "$f"
           done
 
-          # [LINKER DUMMY]: Fix loi cam_spi_write cho OIS Camera
+          # [LINKER DUMMY]: Fix loi cam_spi_write cho OIS Camera (Tranh Error tai phut 60)
           cat << 'EOF' > techpack/camera/drivers/cam_sensor_module/cam_ois/dummy_spi.c
           int cam_spi_query_id(void) { return 0; }
           int cam_spi_write(void) { return 0; }
@@ -76,23 +76,24 @@ jobs:
           # Patch pgtable.h -> mm.h
           find drivers/kernelsu -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' {} + || true
 
-          # [GOD MODE REGEX]: Xóa -Werror nhưng giữ cấu hình an toàn cho Makefile
+          # [GOD MODE REGEX]: Xoa -Werror dien rong de dam bao build khong bi ngat quan
           find . -type f \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) -exec sed -i 's/-Werror=[^ \t,)]*//g; s/-Werror//g' {} + || true
 
-          # Tắt Knox/DEFEX trực tiếp
+          # Tat Knox/DEFEX truc tiep trong defconfig
           if [ -n "$REAL_DEFCONFIG" ]; then
             sed -i 's/CONFIG_KNOX_KAP=y/CONFIG_KNOX_KAP=n/g' "$REAL_DEFCONFIG" || true
             sed -i 's/CONFIG_SECURITY_DEFEX=y/CONFIG_SECURITY_DEFEX=n/g' "$REAL_DEFCONFIG" || true
           fi
 
-      - name: 6. Cau hinh & Bien dich (Proton Clang Engine)
+      - name: 6. Cau hinh & Bien dich (Elite Production Engine)
         run: |
+          # Dua Proton Clang vao PATH
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           cd kernel
           
           DEFCONFIG=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
 
-          # Chích config an toàn bằng scripts/config
+          # Su dung scripts/config de chich bien an toan
           scripts/config --file arch/arm64/configs/$DEFCONFIG \
             -e KSU -e KSU_MANUAL_HOOK -e KPM -e KALLSYMS -d KALLSYMS_ALL \
             -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
@@ -100,18 +101,21 @@ jobs:
             -e SECTION_MISMATCH_WARN_ONLY -d DEBUG_INFO -e KPROBES -e HAVE_KPROBES -e MODULES \
             --set-str LOCALVERSION ""
 
-          MAKE_ARGS="O=out ARCH=arm64 CC=clang HOSTCC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-"
+          # Full LLVM stack voi Proton Clang
+          MAKE_ARGS="O=out ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++ \
+                     NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf \
+                     CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-"
 
           make $MAKE_ARGS $DEFCONFIG
           yes "" | make $MAKE_ARGS olddefconfig
           
-          echo "DANG BUILD DA LUONG (-j$(nproc --all))..."
-          make -j$(nproc --all) $MAKE_ARGS KCFLAGS="-Wno-error" KBUILD_WERROR=0 2>&1 | tee ../build.log
+          echo ">> Starting Production Build..."
+          make -j$(nproc --all) $MAKE_ARGS KCFLAGS="-Wno-error -Wno-documentation" KBUILD_WERROR=0 2>&1 | tee ../build.log
           BUILD_EXIT=${PIPESTATUS[0]}
 
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            echo "⚠️ BUILD DA LUONG THAT BAI! Dang kich hoat che do Single-Thread..."
-            make -j1 $MAKE_ARGS KCFLAGS="-Wno-error" KBUILD_WERROR=0 >> ../build.log 2>&1 || true
+            echo "⚠️ Build failed! Catching errors via Single-thread..."
+            make -j1 $MAKE_ARGS KCFLAGS="-Wno-error -Wno-documentation" KBUILD_WERROR=0 >> ../build.log 2>&1 || true
             echo "══════════════════════════════════════════"
             echo "          ĐÂY LÀ DÒNG LỖI CHÍNH XÁC:        "
             echo "══════════════════════════════════════════"
@@ -122,7 +126,7 @@ jobs:
       - name: 7. Dong goi AnyKernel3
         if: success()
         run: |
-          # Strip debug symbols de kernel nhe hon
+          # Strip debug symbols giup kernel gon nhe (Dung llvm-strip cua Proton)
           $GITHUB_WORKSPACE/clang/bin/llvm-strip kernel/out/arch/arm64/boot/Image || true
           
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
