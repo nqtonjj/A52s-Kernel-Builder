@@ -24,21 +24,28 @@ jobs:
         run: |
           git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
 
-      - name: 4. Tich hop SukiSU-Ultra (Deterministic Hybrid Integration)
+      - name: 4. Tich hop SukiSU-Ultra (Deterministic & Verified Integration)
         run: |
           cd kernel
           
           # 1. Don dep sach se de tranh duplicate neu rerun
-          rm -rf drivers/kernelsu drivers/KernelSU drivers/KernelSU-Next KernelSU
-          sed -i '/kernelsu/d' drivers/Kconfig drivers/Makefile || true
+          rm -rf drivers/KernelSU drivers/kernelsu drivers/KernelSU-Next KernelSU
+          sed -i '/kernelsu/I d' drivers/Kconfig drivers/Makefile || true
 
           # 2. Clone SukiSU-Ultra voi commit on dinh nhat (149f65fa)
           git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
           cd KernelSU && git checkout 149f65fa && cd ..
 
-          # 3. Chay setup.sh (Tu dong lien ket vao drivers/kernelsu)
+          # 3. Chay setup.sh (Phai thanh cong 100%)
+          echo ">> Running SukiSU setup.sh..."
           bash KernelSU/kernel/setup.sh susfs-main || {
             echo "❌ CRITICAL: setup.sh failed!"
+            exit 1
+          }
+
+          # 4. Xac minh ton tai cua file core sau khi setup
+          test -f drivers/kernelsu/ksu.c || {
+            echo "❌ CRITICAL: KernelSU core missing in drivers/kernelsu!"
             exit 1
           }
 
@@ -46,26 +53,27 @@ jobs:
         run: |
           cd kernel
           
-          # Tim defconfig thuc te
-          REAL_DEFCONFIG=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1)
+          # Tim defconfig thuc te (Absolute Target)
+          REAL_DEFCONFIG=$(find arch/arm64/configs -name "a52sxq_defconfig" | head -n 1)
+          [ -z "$REAL_DEFCONFIG" ] && REAL_DEFCONFIG=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1)
           echo "Vá file config: $REAL_DEFCONFIG"
 
-          # [KPM FIX]: Vi include path -I thuong xuyen bi Kbuild phớt lờ, ta copy truc tiep cho chac chan
+          # [KPM FIX]: Copy supercall.h truc tiep vao hang o KPM de tranh loi include path
           mkdir -p drivers/kernelsu/kpm/uapi
           SUPERCALL_SRC=$(find drivers/kernelsu -name "supercall.h" | head -n 1)
           [ -n "$SUPERCALL_SRC" ] && cp "$SUPERCALL_SRC" drivers/kernelsu/kpm/uapi/supercall.h
 
-          # [SECCOMP FIX]: Backport SECCOMP_ARCH_NATIVE_NR cho Kernel 5.4
+          # [SECCOMP FIX]: Backport constants cho Kernel 5.4
           find drivers/kernelsu -type f -name "seccomp_cache.c" -exec sed -i '1i #include <linux/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif' {} + || true
 
           # [FSNOTIFY FIX]: Kernel 5.4 compatibility (Giai quyet loi handle_inode_event)
-          # Dung (void *) cast de Proton Clang khong bat be kieu du lieu
           find drivers/kernelsu -type f -name "*.c" -exec grep -l "handle_inode_event" {} + | while IFS= read -r f; do
+            echo "Patching FSNotify on $f"
             sed -i '1i int dummy_handle_event(void *a, void *b, void *c, void *d, void *e, void *f, void *g, void *h) { return 0; }' "$f"
             sed -i 's/\.handle_inode_event[[:space:]]*=[[:space:]]*[a-zA-Z0-9_]*/\.handle_event = (void *)dummy_handle_event/g' "$f"
           done
 
-          # [LINKER DUMMY]: Fix loi cam_spi_write cho OIS Camera (Tranh Error tai phut 60)
+          # [LINKER DUMMY]: Fix loi cam_spi_write cho OIS Camera (Tranh Error link tai phut 60)
           cat << 'EOF' > techpack/camera/drivers/cam_sensor_module/cam_ois/dummy_spi.c
           int cam_spi_query_id(void) { return 0; }
           int cam_spi_write(void) { return 0; }
@@ -91,10 +99,11 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           cd kernel
           
-          DEFCONFIG=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
+          # Tim ten file config de truyen vao lenh make
+          DEFCONFIG_FILE=$(find arch/arm64/configs -name "*a52sxq*defconfig" | head -n 1 | sed 's|arch/arm64/configs/||')
 
           # Su dung scripts/config de chich bien an toan
-          scripts/config --file arch/arm64/configs/$DEFCONFIG \
+          scripts/config --file arch/arm64/configs/$DEFCONFIG_FILE \
             -e KSU -e KSU_MANUAL_HOOK -e KPM -e KALLSYMS -d KALLSYMS_ALL \
             -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
             -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT \
@@ -106,7 +115,7 @@ jobs:
                      NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf \
                      CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-"
 
-          make $MAKE_ARGS $DEFCONFIG
+          make $MAKE_ARGS "$DEFCONFIG_FILE"
           yes "" | make $MAKE_ARGS olddefconfig
           
           echo ">> Starting Production Build..."
@@ -122,6 +131,14 @@ jobs:
             tail -n 150 ../build.log
             exit 1
           fi
+
+          # [ELITE CHECK]: Kiem tra cac bieu tuong trong file binary cuoi cung
+          echo ">> Verifying SukiSU hooks in binary..."
+          nm out/vmlinux | grep -E "ksu_handle_setuid|kpm_init" || {
+            echo "❌ CRITICAL: SukiSU symbols NOT found in vmlinux! Build corrupted."
+            exit 1
+          }
+          echo "✅ SukiSU Verification Passed!"
 
       - name: 7. Dong goi AnyKernel3
         if: success()
