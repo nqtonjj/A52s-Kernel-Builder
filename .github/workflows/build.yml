@@ -69,9 +69,10 @@ jobs:
           echo "Tiêu diệt kernel-doc..."
           find . -type f -name "kernel-doc" -exec sh -c 'echo "exit 0;" > {}' \; || true
 
-          # 2. Càn quét MỌI biến thể của -Werror
+          # 2. Càn quét MỌI biến thể của -Werror (SỬA LỖI REGEX XÓA NHẦM DẤU NGOẶC)
+          # Chỉ xóa các ký tự không phải là dấu cách, tab, dấu phẩy, hoặc dấu ngoặc đóng
           echo "Càn quét -Werror ẩn..."
-          find . -type f \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) -exec sed -i 's/-Werror=[^[:space:]]*//g; s/-Werror//g' {} + || true
+          find . -type f \( -name "Makefile" -o -name "Kbuild" -o -name "*.mk" \) -exec sed -i 's/-Werror=[^ \t,)]*//g; s/-Werror//g' {} + || true
 
           # 3. Ép cờ -Wno-error vào thẳng Makefile chủ
           echo "Tiêm kháng thể vào Makefile gốc..."
