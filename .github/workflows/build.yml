@@ -86,7 +86,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-v2
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-v3
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -136,15 +136,7 @@ jobs:
           rm -rf KernelSU drivers/kernelsu
           git config --global advice.detachedHead false
 
-          git clone --depth=1 "${SUKISU_REPO}" KernelSU
-
-          if git ls-remote --exit-code --heads origin "${SUKISU_REF}" >/dev/null 2>&1 || \
-             git ls-remote --exit-code --tags origin "${SUKISU_REF}" >/dev/null 2>&1; then
-            git -C KernelSU fetch --depth=1 origin "${SUKISU_REF}"
-            git -C KernelSU checkout -f FETCH_HEAD
-          else
-            echo "::warning::Requested SukiSU ref '${SUKISU_REF}' is not publicly reachable; keeping default branch 'main'"
-          fi
+          git clone --depth=1 -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
 
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
 
@@ -180,11 +172,21 @@ jobs:
           if git apply --check --unsafe-paths "${SUSFS_KERNEL_PATCH}" >/dev/null 2>&1; then
             git apply --unsafe-paths "${SUSFS_KERNEL_PATCH}"
           else
-            patch --batch --forward -p1 --fuzz=3 < "${SUSFS_KERNEL_PATCH}" || {
-              echo "::error::Failed to apply SUSFS kernel patch"
-              find . -type f \( -name '*.rej' -o -name '*.orig' \) -print || true
+            set +e
+            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=3 < "${SUSFS_KERNEL_PATCH}" 2>&1 | tee -a "${LOG}"
+            PATCH_RC=${PIPESTATUS[0]}
+            set -e
+
+            REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
+            if [ "${REJ_COUNT}" != "0" ]; then
+              echo "::error::SUSFS kernel patch left ${REJ_COUNT} reject file(s)"
+              find . -type f -name '*.rej' -print
               exit 1
-            }
+            fi
+
+            if [ "${PATCH_RC}" != "0" ]; then
+              echo "::warning::patch exited with code ${PATCH_RC} but no .rej was produced; continuing"
+            fi
           fi
 
           grep -q '<linux/stat.h>' include/linux/susfs.h || \
@@ -199,6 +201,10 @@ jobs:
             echo "::error::fs/susfs.c missing"
             exit 1
           }
+
+          echo "::group::SUSFS inventory"
+          ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c
+          echo "::endgroup::"
 
       - name: Patch A52s defconfig and disable Samsung security gates
         shell: bash
@@ -257,6 +263,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/07-build-driver.log"
+          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
           mkdir -p "${CCACHE_DIR}"
@@ -283,14 +291,14 @@ jobs:
               CC="${cc_bin}" LD="${ld_bin}" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
-              "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/07-build-${tag}-defconfig.log"
+              "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
 
             stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" -j"$(nproc --all)" \
               ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
               CC="${cc_bin}" LD="${ld_bin}" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
-              2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}.log"
+              2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
           if build_once "llvm18" "ccache clang" "ld.lld"; then
@@ -312,7 +320,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/09-pack.log"
+          LOG="${GITHUB_WORKSPACE}/10-pack.log"
           exec > >(tee -a "${LOG}") 2>&1
 
           git clone --depth=1 "${ANYKERNEL_REPO}" AnyKernel3
@@ -373,6 +381,7 @@ jobs:
               re.compile(r"Hunk #\d+ .*FAILED", re.I),
               re.compile(r"can't find remote ref.*", re.I),
               re.compile(r"can't find file to patch.*", re.I),
+              re.compile(r"reject file", re.I),
               re.compile(r"missing", re.I),
               re.compile(r"not found", re.I),
               re.compile(r"warning:.*", re.I),
@@ -397,7 +406,7 @@ jobs:
                       print(f"{i:06d}: {line.rstrip()}")
                   print()
                   continue
-              for idx in hits[-12:]:
+              for idx in hits[-16:]:
                   start = max(0, idx - 6)
                   end = min(len(lines), idx + 7)
                   print(f"--- context lines {start+1}-{end} ---")
