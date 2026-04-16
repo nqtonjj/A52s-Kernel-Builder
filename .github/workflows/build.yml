@@ -57,6 +57,8 @@ jobs:
       KERNEL_REPO: https://github.com/JingMatrix/samsung_sm7325
       ANYKERNEL_REPO: https://github.com/SM7325-AE/AnyKernel3
       SUKISU_SETUP_URL: https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh
+      SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+      SUSFS_REF: kernel-5.4
       CCACHE_DIR: ${{ github.workspace }}/.ccache
 
     steps:
@@ -137,14 +139,42 @@ jobs:
 
           curl -LSs "${SUKISU_SETUP_URL}" | bash -s "${{ github.event.inputs.sukisu_mode }}"
 
-      - name: Verify SUSFS headers are present
+      - name: Materialize SUSFS patch set for kernel 5.4 when missing
         shell: bash
         run: |
           set -euxo pipefail
           cd kernel
           if [[ "${{ github.event.inputs.sukisu_mode }}" == susfs-* ]]; then
+            if [ ! -f include/linux/susfs.h ]; then
+              echo "::warning::SUSFS branch selected but include/linux/susfs.h is missing after setup.sh; applying kernel-5.4 SUSFS patchset"
+              git clone --depth=1 -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
+
+              cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+              cp -fv ../susfs4ksu/kernel_patches/fs/* fs/
+
+              cp -fv ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
+              SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
+              test -n "${SUSFS_KERNEL_PATCH}"
+
+              cd KernelSU
+              patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || {
+                echo "::error::Failed to patch KernelSU for SUSFS"
+                find . -type f \( -name '*.rej' -o -name '*.orig' \) -print || true
+                exit 1
+              }
+              cd ..
+
+              patch -p1 --forward --fuzz=3 < "${SUSFS_KERNEL_PATCH}" || {
+                echo "::error::Failed to patch kernel tree with SUSFS 5.4 patch"
+                find . -type f \( -name '*.rej' -o -name '*.orig' \) -print || true
+                exit 1
+              }
+
+              grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
+            fi
+
             test -f include/linux/susfs.h || {
-              echo "::error::SUSFS mode selected but include/linux/susfs.h is missing"
+              echo "::error::SUSFS mode selected but include/linux/susfs.h is still missing"
               echo "::group::linux include inventory"
               find include/linux -maxdepth 1 -type f | sed 's#^#FOUND: #'
               echo "::endgroup::"
@@ -174,7 +204,7 @@ jobs:
 
           if [[ "${{ github.event.inputs.sukisu_mode }}" == susfs-* ]]; then
             enable_cfg CONFIG_KSU_SUSFS
-            disable_cfg CONFIG_KSU_MANUAL_HOOK
+            enable_cfg CONFIG_KSU_MANUAL_HOOK
             disable_cfg CONFIG_KSU_NONE_HOOK
           else
             disable_cfg CONFIG_KSU_SUSFS
