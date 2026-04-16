@@ -1,4 +1,4 @@
-name: sm7325-sukisu-ultra-susfs-live-logs
+name: sm7325-a52s-sukisu-susfs-builder
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         default: "oneui-ksu"
       region:
-        description: "A52s region defconfig"
+        description: "A52s defconfig region"
         required: true
         type: choice
         default: "eur"
@@ -16,34 +16,28 @@ on:
           - eur
           - chn
           - kor
-      sukisu_mode:
-        description: "SukiSU integration mode"
+      sukisu_ref:
+        description: "SukiSU-Ultra ref/branch/tag"
         required: true
-        type: choice
         default: "susfs-main"
-        options:
-          - susfs-main
-          - susfs-dev
-          - susfs-test
-          - builtin
       kernel_name:
-        description: "Kernel name shown in AnyKernel3"
+        description: "Kernel display name"
         required: true
         default: "A52s-SukiSU-Ultra-SUSFS"
       upload_patched_source:
-        description: "Upload patched kernel tree tarball"
+        description: "Upload patched source tarball"
         required: true
         type: boolean
         default: false
 
 concurrency:
-  group: sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}
+  group: sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}-${{ github.event.inputs.sukisu_ref }}
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     permissions:
       contents: read
     env:
@@ -56,7 +50,7 @@ jobs:
       TARGET_BUILD_VARIANT: user
       KERNEL_REPO: https://github.com/JingMatrix/samsung_sm7325
       ANYKERNEL_REPO: https://github.com/SM7325-AE/AnyKernel3
-      SUKISU_SETUP_URL: https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh
+      SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
       SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
       SUSFS_REF: kernel-5.4
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -68,19 +62,22 @@ jobs:
       - name: Free disk space
         shell: bash
         run: |
+          set -euxo pipefail
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          docker system prune -af || true
           df -h
 
       - name: Install build dependencies
         shell: bash
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential ccache cpio curl device-tree-compiler flex gawk git jq \
-            libelf-dev libssl-dev lz4 pahole python3 rsync unzip xz-utils zip zstd \
+            bc bison build-essential ccache cpio curl device-tree-compiler file flex gawk git jq \
+            libelf-dev libssl-dev lld llvm clang clang-14 lld-14 llvm-14 \
+            pahole patch python3 rsync unzip xz-utils zip zstd \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            clang lld llvm clang-14 lld-14 llvm-14
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
           clang --version || true
           clang-14 --version || true
 
@@ -88,7 +85,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.sukisu_mode }}-live-v1
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.sukisu_ref }}-v1
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -101,86 +98,100 @@ jobs:
           git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
           cd kernel
           git log --oneline -1
-          test -f .gitmodules && cat .gitmodules || true
+          git submodule status || true
+          test -d arch/arm64/configs/vendor
 
-      - name: Resolve exact A52s defconfig
+      - name: Resolve A52s defconfig
         id: cfg
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           case "${{ github.event.inputs.region }}" in
             eur) DEFCONFIG="a52sxq_eur_open_defconfig" ;;
             chn) DEFCONFIG="a52sxq_chn_tw_defconfig" ;;
             kor) DEFCONFIG="a52sxq_kor_single_defconfig" ;;
             *) echo "::error::Unsupported region"; exit 1 ;;
           esac
+
           DEFCONFIG_PATH="kernel/arch/arm64/configs/vendor/${DEFCONFIG}"
-          test -f "${DEFCONFIG_PATH}" || { echo "::error::Missing ${DEFCONFIG_PATH}"; exit 1; }
+          test -f "${DEFCONFIG_PATH}"
+
           echo "defconfig=${DEFCONFIG}" >> "${GITHUB_OUTPUT}"
           echo "defconfig_path=${DEFCONFIG_PATH}" >> "${GITHUB_OUTPUT}"
           echo "out_dir=${GITHUB_WORKSPACE}/out" >> "${GITHUB_OUTPUT}"
 
-      - name: Replace embedded KernelSU with SukiSU Ultra
+      - name: Replace bundled KernelSU with SukiSU-Ultra
         shell: bash
         run: |
           set -euxo pipefail
           cd kernel
 
-          rm -rf KernelSU || true
-          if [ -f .gitmodules ]; then
-            sed -i '/\[submodule "KernelSU"\]/,+2d' .gitmodules || true
-          fi
+          rm -rf KernelSU drivers/kernelsu
+          git config --global advice.detachedHead false
 
-          grep -RIl --exclude-dir=.git \
-            --include='Kconfig*' --include='Makefile*' \
-            -e 'KernelSU/Kconfig' -e 'KernelSU/' . | while read -r f; do
-              sed -i '/KernelSU\/Kconfig/d;/KernelSU\//d' "${f}"
-            done || true
+          git clone --depth=1 "${SUKISU_REPO}" KernelSU
+          git -C KernelSU fetch --depth=1 origin "${{ github.event.inputs.sukisu_ref }}"
+          git -C KernelSU checkout -f FETCH_HEAD
 
-          curl -LSs "${SUKISU_SETUP_URL}" | bash -s "${{ github.event.inputs.sukisu_mode }}"
+          ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
 
-      - name: Materialize SUSFS patch set for kernel 5.4 when missing
+          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+
+          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+            sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          echo "::group::SukiSU HEAD"
+          git -C KernelSU rev-parse --abbrev-ref HEAD || true
+          git -C KernelSU rev-parse --short HEAD
+          git -C KernelSU log --oneline -1
+          echo "::endgroup::"
+
+      - name: Materialize SUSFS kernel-side patchset
         shell: bash
         run: |
           set -euxo pipefail
           cd kernel
-          if [[ "${{ github.event.inputs.sukisu_mode }}" == susfs-* ]]; then
-            if [ ! -f include/linux/susfs.h ]; then
-              echo "::warning::SUSFS branch selected but include/linux/susfs.h is missing after setup.sh; applying kernel-5.4 SUSFS patchset"
-              git clone --depth=1 -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
 
-              cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/
-              cp -fv ../susfs4ksu/kernel_patches/fs/* fs/
+          if [[ "${{ github.event.inputs.sukisu_ref }}" == susfs-* ]]; then
+            rm -rf ../susfs4ksu
+            git clone --depth=1 -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
 
-              cp -fv ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
-              SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
-              test -n "${SUSFS_KERNEL_PATCH}"
+            cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+            cp -fv ../susfs4ksu/kernel_patches/fs/* fs/
 
-              cd KernelSU
-              patch -p1 --forward --fuzz=3 < 10_enable_susfs_for_ksu.patch || {
-                echo "::error::Failed to patch KernelSU for SUSFS"
+            SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
+            test -n "${SUSFS_KERNEL_PATCH}"
+
+            if git apply --check --unsafe-paths "${SUSFS_KERNEL_PATCH}" >/dev/null 2>&1; then
+              git apply --unsafe-paths "${SUSFS_KERNEL_PATCH}"
+            else
+              patch --batch --forward -p1 --fuzz=3 < "${SUSFS_KERNEL_PATCH}" || {
+                echo "::error::Failed to apply SUSFS kernel patch"
                 find . -type f \( -name '*.rej' -o -name '*.orig' \) -print || true
                 exit 1
               }
-              cd ..
-
-              patch -p1 --forward --fuzz=3 < "${SUSFS_KERNEL_PATCH}" || {
-                echo "::error::Failed to patch kernel tree with SUSFS 5.4 patch"
-                find . -type f \( -name '*.rej' -o -name '*.orig' \) -print || true
-                exit 1
-              }
-
-              grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
             fi
 
-            test -f include/linux/susfs.h || {
-              echo "::error::SUSFS mode selected but include/linux/susfs.h is still missing"
-              echo "::group::linux include inventory"
-              find include/linux -maxdepth 1 -type f | sed 's#^#FOUND: #'
-              echo "::endgroup::"
-              exit 1
-            }
+            grep -q '<linux/stat.h>' include/linux/susfs.h || \
+              sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
           fi
+
+          test -f include/linux/susfs.h || {
+            echo "::error::include/linux/susfs.h missing"
+            echo "::group::include/linux inventory"
+            find include/linux -maxdepth 1 -type f | sed 's#^#FOUND: #'
+            echo "::endgroup::"
+            exit 1
+          }
+
+          test -f fs/susfs.c || {
+            echo "::error::fs/susfs.c missing"
+            echo "::group::fs inventory"
+            find fs -maxdepth 1 -type f | sed 's#^#FOUND: #'
+            echo "::endgroup::"
+            exit 1
+          }
 
       - name: Patch A52s defconfig and disable Samsung security gates
         shell: bash
@@ -201,18 +212,15 @@ jobs:
           }
 
           enable_cfg CONFIG_KSU
+          enable_cfg CONFIG_KSU_MANUAL_HOOK
+          disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
+          disable_cfg CONFIG_KSU_NONE_HOOK
 
-          if [[ "${{ github.event.inputs.sukisu_mode }}" == susfs-* ]]; then
+          if [[ "${{ github.event.inputs.sukisu_ref }}" == susfs-* ]]; then
             enable_cfg CONFIG_KSU_SUSFS
-            enable_cfg CONFIG_KSU_MANUAL_HOOK
-            disable_cfg CONFIG_KSU_NONE_HOOK
           else
             disable_cfg CONFIG_KSU_SUSFS
-            enable_cfg CONFIG_KSU_MANUAL_HOOK
-            disable_cfg CONFIG_KSU_NONE_HOOK
           fi
-
-          disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
 
           for key in \
             CONFIG_SECURITY_DEFEX \
@@ -231,18 +239,16 @@ jobs:
             CONFIG_KNOX \
             CONFIG_KNOX_GUARD \
             CONFIG_SEC_RESTRICT_SETUID \
-            CONFIG_SEC_RESTRICT_ROOTING \
-            CONFIG_SEC_DEBUG \
-            CONFIG_SECURITY_SELINUX_DEVELOP
+            CONFIG_SEC_RESTRICT_ROOTING
           do
             disable_cfg "${key}"
           done
 
-          echo "::group::Patched defconfig highlights"
-          grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING|SUSFS' "${DEFCONFIG}" || true
+          echo "::group::Defconfig flags"
+          grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "${DEFCONFIG}" || true
           echo "::endgroup::"
 
-      - name: Build kernel with smart toolchain fallback
+      - name: Build kernel
         id: build
         shell: bash
         run: |
@@ -250,7 +256,7 @@ jobs:
           cd kernel
 
           mkdir -p "${CCACHE_DIR}"
-          ccache -M 6G || true
+          ccache -M 8G || true
           ccache -z || true
 
           export KBUILD_BUILD_USER="github-actions"
@@ -268,23 +274,19 @@ jobs:
             rm -rf "${out_dir}"
             mkdir -p "${out_dir}"
 
-            echo "::group::${tag} defconfig"
             stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" \
               ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
               CC="${cc_bin}" LD="${ld_bin}" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
               "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/build-${tag}-defconfig.log"
-            echo "::endgroup::"
 
-            echo "::group::${tag} kernel build"
             stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" -j"$(nproc --all)" \
               ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
               CC="${cc_bin}" LD="${ld_bin}" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
               2>&1 | tee "${GITHUB_WORKSPACE}/build-${tag}.log"
-            echo "::endgroup::"
           }
 
           if build_once "llvm18" "ccache clang" "ld.lld"; then
@@ -297,98 +299,10 @@ jobs:
           fi
 
           test -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image"
-
-          echo "::group::Produced kernel artifacts"
-          find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -maxdepth 6 \
-            \( -name 'Image' -o -name 'dtbo.img' -o -name '*.dtb' \) -print | sort
-          echo "::endgroup::"
-
+          file "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" || true
           ccache -s || true
 
-      - name: Print core build errors to console
-        if: ${{ failure() }}
-        shell: bash
-        run: |
-          set +e
-          echo "::group::Core error extractor"
-          python3 - <<'PY'
-          import glob, os, re
-
-          patterns = [
-              re.compile(r"fatal error:.*", re.I),
-              re.compile(r"error:.*", re.I),
-              re.compile(r"undefined reference to.*", re.I),
-              re.compile(r"No rule to make target.*", re.I),
-              re.compile(r"not found", re.I),
-              re.compile(r"FAILED:.*", re.I),
-          ]
-
-          logs = sorted(glob.glob("/home/runner/work/*/*/build-*.log")) + sorted(glob.glob("build-*.log"))
-          logs = sorted(set(logs))
-          if not logs:
-              print("No build log found.")
-              raise SystemExit(0)
-
-          for path in logs:
-              print(f"===== {os.path.basename(path)} =====")
-              try:
-                  with open(path, "r", errors="ignore") as f:
-                      lines = f.readlines()
-              except Exception as e:
-                  print(f"Cannot read {path}: {e}")
-                  continue
-
-              hits = []
-              for idx, line in enumerate(lines):
-                  if any(p.search(line) for p in patterns):
-                      hits.append(idx)
-
-              if not hits:
-                  tail = lines[-120:]
-                  print("No core error matched. Showing last 120 lines:")
-                  print("".join(tail))
-                  continue
-
-              shown = set()
-              for idx in hits[-8:]:
-                  start = max(0, idx - 6)
-                  end = min(len(lines), idx + 7)
-                  key = (start, end)
-                  if key in shown:
-                      continue
-                  shown.add(key)
-                  print(f"--- context lines {start+1}-{end} ---")
-                  for no in range(start, end):
-                      print(f"{no+1:06d}: {lines[no].rstrip()}")
-                  print()
-          PY
-          echo "::endgroup::"
-
-      - name: Write build summary
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          {
-            echo "## SM7325 build summary"
-            echo
-            echo "- Branch: \`${{ github.event.inputs.kernel_branch }}\`"
-            echo "- Region: \`${{ github.event.inputs.region }}\`"
-            echo "- Mode: \`${{ github.event.inputs.sukisu_mode }}\`"
-            echo "- Defconfig: \`${{ steps.cfg.outputs.defconfig }}\`"
-            echo "- Toolchain: \`${{ steps.build.outputs.toolchain || 'failed-before-success' }}\`"
-            echo
-            echo "### Last log tail"
-            echo '```text'
-            LAST_LOG="$(ls -1t "${GITHUB_WORKSPACE}"/build-*.log 2>/dev/null | head -n1 || true)"
-            if [ -n "${LAST_LOG}" ]; then
-              tail -n 120 "${LAST_LOG}"
-            else
-              echo "No build log generated."
-            fi
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Prepare AnyKernel3 package for a52sxq
+      - name: Prepare AnyKernel3 package
         id: pack
         shell: bash
         run: |
@@ -399,7 +313,6 @@ jobs:
           sed -i \
             -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|" \
             -e 's|^device.name1=.*|device.name1=a52sxq|' \
-            -e 's|^supported.versions=.*|supported.versions=16|' \
             AnyKernel3/anykernel.sh
 
           grep -q '^device.name2=' AnyKernel3/anykernel.sh \
@@ -427,22 +340,90 @@ jobs:
             cd AnyKernel3
             zip -r9 "../${ZIP_NAME}" . \
               -x '.git/*' \
+                 '.github/*' \
                  'README.md' \
                  '*.gitignore'
           )
 
           echo "zip_name=${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
 
+      - name: Print core build errors to console
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          set +e
+          echo "::group::Core error extractor"
+          python3 - <<'PY'
+          import glob, os, re
+
+          patterns = [
+              re.compile(r"fatal error:.*", re.I),
+              re.compile(r"\berror:.*", re.I),
+              re.compile(r"undefined reference to.*", re.I),
+              re.compile(r"No rule to make target.*", re.I),
+              re.compile(r"FAILED:.*", re.I),
+              re.compile(r"patching file .*", re.I),
+              re.compile(r"Hunk #\d+ .*FAILED", re.I),
+              re.compile(r"can't find file to patch.*", re.I),
+              re.compile(r"missing", re.I),
+              re.compile(r"not found", re.I),
+          ]
+
+          logs = sorted(set(glob.glob("build-*.log")))
+          if not logs:
+              print("No build logs found in workspace.")
+          for path in logs:
+              print(f"===== {os.path.basename(path)} =====")
+              with open(path, "r", errors="ignore") as f:
+                  lines = f.readlines()
+              hits = []
+              for idx, line in enumerate(lines):
+                  if any(p.search(line) for p in patterns):
+                      hits.append(idx)
+              if not hits:
+                  tail = lines[-120:]
+                  for i, line in enumerate(tail, start=max(1, len(lines)-len(tail)+1)):
+                      print(f"{i:06d}: {line.rstrip()}")
+                  continue
+              for idx in hits[-12:]:
+                  start = max(0, idx - 6)
+                  end = min(len(lines), idx + 7)
+                  print(f"--- context lines {start+1}-{end} ---")
+                  for no in range(start, end):
+                      print(f"{no+1:06d}: {lines[no].rstrip()}")
+                  print()
+          PY
+          echo "::endgroup::"
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## SM7325 A52s SukiSU/SUSFS build summary"
+            echo
+            echo "- kernel_branch: \`${{ github.event.inputs.kernel_branch }}\`"
+            echo "- region: \`${{ github.event.inputs.region }}\`"
+            echo "- sukisu_ref: \`${{ github.event.inputs.sukisu_ref }}\`"
+            echo "- defconfig: \`${{ steps.cfg.outputs.defconfig }}\`"
+            echo "- toolchain: \`${{ steps.build.outputs.toolchain || 'failed-before-build' }}\`"
+            echo
+            echo "### Tail of logs"
+            echo '```text'
+            tail -n 120 build-*.log 2>/dev/null || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Pack debug bundle
-        if: ${{ always() }}
+        if: always()
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p debug
           cp -f build-*.log debug/ 2>/dev/null || true
-          cp -f kernel/.gitmodules debug/gitmodules.after 2>/dev/null || true
           cp -f "${{ steps.cfg.outputs.defconfig_path }}" debug/defconfig.after 2>/dev/null || true
           cp -f AnyKernel3/anykernel.sh debug/anykernel.sh.after 2>/dev/null || true
+          find kernel -type f \( -name '*.rej' -o -name '*.orig' \) -exec cp --parents {} debug/ \; 2>/dev/null || true
 
       - name: Upload flashable AnyKernel3 zip
         if: ${{ success() }}
@@ -453,7 +434,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload debug logs
-        if: ${{ always() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sm7325-debug-${{ github.run_id }}
@@ -461,13 +442,14 @@ jobs:
           if-no-files-found: warn
 
       - name: Create patched source archive
-        if: ${{ success() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
+        if: ${{ always() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
         shell: bash
         run: |
+          set -euxo pipefail
           tar --exclude='.git' -caf patched-sm7325-source.tar.zst kernel
 
       - name: Upload patched source artifact
-        if: ${{ success() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
+        if: ${{ always() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
         uses: actions/upload-artifact@v4
         with:
           name: patched-sm7325-source-${{ github.run_id }}
