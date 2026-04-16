@@ -1,228 +1,445 @@
-name: Build Kernel A52s SukiSU (Elite Stealth)
+name: sm7325-sukisu-ultra-susfs-live-logs
 
 on:
   workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "JingMatrix kernel branch"
+        required: true
+        default: "oneui-ksu"
+      region:
+        description: "A52s region defconfig"
+        required: true
+        type: choice
+        default: "eur"
+        options:
+          - eur
+          - chn
+          - kor
+      sukisu_mode:
+        description: "SukiSU integration mode"
+        required: true
+        type: choice
+        default: "susfs-main"
+        options:
+          - susfs-main
+          - susfs-dev
+          - susfs-test
+          - builtin
+      kernel_name:
+        description: "Kernel name shown in AnyKernel3"
+        required: true
+        default: "A52s-SukiSU-Ultra-SUSFS"
+      upload_patched_source:
+        description: "Upload patched kernel tree tarball"
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}
+  cancel-in-progress: false
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
     env:
-      # Tách riêng CC để tránh lỗi shell splitting khi có dấu cách
-      CC: "ccache clang"
+      TZ: Asia/Bangkok
+      ARCH: arm64
+      LLVM: "1"
+      LLVM_IAS: "1"
+      ANDROID_MAJOR_VERSION: u
+      PLATFORM_VERSION: "16"
+      TARGET_BUILD_VARIANT: user
+      KERNEL_REPO: https://github.com/JingMatrix/samsung_sm7325
+      ANYKERNEL_REPO: https://github.com/SM7325-AE/AnyKernel3
+      SUKISU_SETUP_URL: https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
 
     steps:
-      - name: 1. Cài đặt công cụ (Enterprise Optimized)
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        shell: bash
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y bc build-essential git flex bison lz4 libssl-dev libelf-dev gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu cpio python3 python3-pip zstd rsync zip curl ccache wget
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          df -h
 
-      - name: 2. Quản lý Cache Toolchain (Stable)
-        uses: actions/cache@v4
-        id: cache-toolchain
-        with:
-          path: clang
-          key: clang-proton-stable-5b7c6e3 # Đã pin SHA commit toolchain
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache cpio curl device-tree-compiler flex gawk git jq \
+            libelf-dev libssl-dev lz4 pahole python3 rsync unzip xz-utils zip zstd \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            clang lld llvm clang-14 lld-14 llvm-14
+          clang --version || true
+          clang-14 --version || true
 
-      - name: 2.1 Quản lý Cache Ccache (Reusable)
+      - name: Cache ccache
         uses: actions/cache@v4
         with:
-          path: .ccache
-          key: ccache-kernel-v1-${{ runner.os }}
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.sukisu_mode }}-live-v1
           restore-keys: |
-            ccache-kernel-v1-${{ runner.os }}-
+            ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
+            ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
+            ${{ runner.os }}-ccache-sm7325-
 
-      - name: 2.2 Setup Toolchain (Pinned SHA) & Ccache Tuning
+      - name: Clone JingMatrix kernel source
+        shell: bash
         run: |
-          # Pin Clang commit để đạt 10/10 Determinism
-          if [ ! -d "clang/bin" ]; then
-            rm -rf clang
-            git clone https://github.com/kdrag0n/proton-clang clang
-            cd clang && git checkout 5b7c6e3 && cd ..
+          set -euxo pipefail
+          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
+          cd kernel
+          git log --oneline -1
+          test -f .gitmodules && cat .gitmodules || true
+
+      - name: Resolve exact A52s defconfig
+        id: cfg
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ github.event.inputs.region }}" in
+            eur) DEFCONFIG="a52sxq_eur_open_defconfig" ;;
+            chn) DEFCONFIG="a52sxq_chn_tw_defconfig" ;;
+            kor) DEFCONFIG="a52sxq_kor_single_defconfig" ;;
+            *) echo "::error::Unsupported region"; exit 1 ;;
+          esac
+          DEFCONFIG_PATH="kernel/arch/arm64/configs/vendor/${DEFCONFIG}"
+          test -f "${DEFCONFIG_PATH}" || { echo "::error::Missing ${DEFCONFIG_PATH}"; exit 1; }
+          echo "defconfig=${DEFCONFIG}" >> "${GITHUB_OUTPUT}"
+          echo "defconfig_path=${DEFCONFIG_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "out_dir=${GITHUB_WORKSPACE}/out" >> "${GITHUB_OUTPUT}"
+
+      - name: Replace embedded KernelSU with SukiSU Ultra
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd kernel
+
+          rm -rf KernelSU || true
+          if [ -f .gitmodules ]; then
+            sed -i '/\[submodule "KernelSU"\]/,+2d' .gitmodules || true
           fi
-          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
-          
-          # Cấu hình Ccache tối ưu nhất cho Kernel
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> $GITHUB_ENV
-          echo "CCACHE_COMPILERCHECK=content" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
-          echo "CCACHE_SLOPPINESS=time_macros" >> $GITHUB_ENV
-          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "CCACHE_NOHASHDIR=true" >> $GITHUB_ENV
 
-      - name: 3. Tải mã nguồn Kernel (True Determinism)
+          grep -RIl --exclude-dir=.git \
+            --include='Kconfig*' --include='Makefile*' \
+            -e 'KernelSU/Kconfig' -e 'KernelSU/' . | while read -r f; do
+              sed -i '/KernelSU\/Kconfig/d;/KernelSU\//d' "${f}"
+            done || true
+
+          curl -LSs "${SUKISU_SETUP_URL}" | bash -s "${{ github.event.inputs.sukisu_mode }}"
+
+      - name: Verify SUSFS headers are present
+        shell: bash
         run: |
-          # Clone JingMatrix SM7325
-          git clone --depth=1 -b oneui-ksu https://github.com/JingMatrix/samsung_sm7325.git kernel
+          set -euxo pipefail
           cd kernel
-          git rev-parse HEAD > ../kernel_commit.txt
+          if [[ "${{ github.event.inputs.sukisu_mode }}" == susfs-* ]]; then
+            test -f include/linux/susfs.h || {
+              echo "::error::SUSFS mode selected but include/linux/susfs.h is missing"
+              echo "::group::linux include inventory"
+              find include/linux -maxdepth 1 -type f | sed 's#^#FOUND: #'
+              echo "::endgroup::"
+              exit 1
+            }
+          fi
 
-      - name: 4. Tích hợp SukiSU-Ultra (Kiến trúc chuẩn)
+      - name: Patch A52s defconfig and disable Samsung security gates
+        shell: bash
         run: |
-          cd kernel
-          # Clean triệt để ignored files để ccache hit sạch
-          git clean -fdx drivers/ KernelSU/ out/ || true
-          rm -rf drivers/KernelSU drivers/kernelsu KernelSU
-          sed -i '/kernelsu/I d' drivers/Kconfig drivers/Makefile || true
+          set -euxo pipefail
+          DEFCONFIG="${{ steps.cfg.outputs.defconfig_path }}"
 
-          # Shallow fetch SukiSU (Commit 149f65fa)
-          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
-          cd KernelSU && git checkout 149f65fa && cd ..
+          disable_cfg() {
+            local key="$1"
+            sed -i "/^${key}=y$/d;/^${key}=m$/d;/^# ${key} is not set$/d" "${DEFCONFIG}"
+            printf '# %s is not set\n' "${key}" >> "${DEFCONFIG}"
+          }
 
-          echo ">> Running SukiSU setup.sh..."
-          bash KernelSU/kernel/setup.sh || { echo "❌ setup.sh failed!"; exit 1; }
-          
-          # MANDATORY HOOK: Đảm bảo SukiSU luôn được include chuẩn (Idempotent)
-          grep -q "obj-y += KernelSU/" drivers/Makefile || echo "obj-y += KernelSU/" >> drivers/Makefile
-          grep -q 'source "drivers/KernelSU/Kconfig"' drivers/Kconfig || sed -i '$a source "drivers/KernelSU/Kconfig"' drivers/Kconfig
+          enable_cfg() {
+            local key="$1"
+            sed -i "/^${key}=y$/d;/^${key}=m$/d;/^# ${key} is not set$/d" "${DEFCONFIG}"
+            printf '%s=y\n' "${key}" >> "${DEFCONFIG}"
+          }
 
-      - name: 5. Vá lỗi mã nguồn (Deep Security Neutralization & Surgical Patch)
-        run: |
-          cd kernel
-          
-          # ── Fix 1: Backport pgtable.h ──────────────────────────────
-          grep -rl "<linux/pgtable.h>" KernelSU | xargs -r sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' || true
+          enable_cfg CONFIG_KSU
 
-          # ── Fix 2: Netfilter -Werror ───────────────────────────────
-          [ -f net/netfilter/Makefile ] && sed -i 's/-Werror//g' net/netfilter/Makefile
+          if [[ "${{ github.event.inputs.sukisu_mode }}" == susfs-* ]]; then
+            enable_cfg CONFIG_KSU_SUSFS
+            disable_cfg CONFIG_KSU_MANUAL_HOOK
+            disable_cfg CONFIG_KSU_NONE_HOOK
+          else
+            disable_cfg CONFIG_KSU_SUSFS
+            enable_cfg CONFIG_KSU_MANUAL_HOOK
+            disable_cfg CONFIG_KSU_NONE_HOOK
+          fi
 
-          # ── Fix 3: SECCOMP constants (printf + cat logic) ──────────
-          find KernelSU -name seccomp_cache.c | while read f; do
-            printf '#include <linux/unistd.h>\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define SECCOMP_ARCH_NATIVE_NR NR_syscalls\n#endif\n' \
-              | cat - "$f" > /tmp/_sec.c && mv /tmp/_sec.c "$f"
+          disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
+
+          for key in \
+            CONFIG_SECURITY_DEFEX \
+            CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
+            CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
+            CONFIG_SECURITY_PROCA \
+            CONFIG_PROCA \
+            CONFIG_RKP \
+            CONFIG_RKP_CFP \
+            CONFIG_RKP_NS_PROT \
+            CONFIG_RKP_KDP \
+            CONFIG_TIMA \
+            CONFIG_TIMA_RKP \
+            CONFIG_TIMA_SECBOOT \
+            CONFIG_TIMA_LKMAUTH \
+            CONFIG_KNOX \
+            CONFIG_KNOX_GUARD \
+            CONFIG_SEC_RESTRICT_SETUID \
+            CONFIG_SEC_RESTRICT_ROOTING \
+            CONFIG_SEC_DEBUG \
+            CONFIG_SECURITY_SELINUX_DEVELOP
+          do
+            disable_cfg "${key}"
           done
 
-          # ── Fix 4: allowlist.c (Top-Injection sạch tuyệt đối) ──────
-          ALLOWLIST="KernelSU/kernel/allowlist.c"
-          if [ -f "$ALLOWLIST" ]; then
-            echo ">> Surgical patching $ALLOWLIST..."
-            # Xóa các include cũ và rác để rebuild sạch
-            grep -v "linux/sched.h" "$ALLOWLIST" | grep -v "linux/cred.h" | grep -v "linux/task_work.h" | grep -v "linux/sched/signal.h" | grep -v "TWA_RESUME" | grep -v "put_task_struct" > "$ALLOWLIST.tmp"
-            printf '#include <linux/sched/signal.h>\n#include <linux/sched.h>\n#include <linux/cred.h>\n#include <linux/task_work.h>\n#ifndef TWA_RESUME\n#define TWA_RESUME 0\n#endif\n' > "$ALLOWLIST"
-            cat "$ALLOWLIST.tmp" >> "$ALLOWLIST" && rm "$ALLOWLIST.tmp"
-          fi
+          echo "::group::Patched defconfig highlights"
+          grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING|SUSFS' "${DEFCONFIG}" || true
+          echo "::endgroup::"
 
-          # ── Fix 5: Camera adaptive mipi (Comment thay vì replace) ──
-          find techpack/camera -name Makefile -type f -exec sed -i '/camera_adaptive_mipi/s/^/#/' {} +
-
-          # ── Fix 6: Fake perflog.h (Delimiter an toàn |) ────────────
-          mkdir -p include/linux/log
-          printf '#ifndef _LINUX_PERFLOG_H\n#define _LINUX_PERFLOG_H\nstatic inline void perf_log_printk(const char *fmt, ...) {}\n#endif\n' > include/linux/log/perflog.h
-          grep -rl --include="*.c" --include="*.h" "perflog.h" kernel/ drivers/ fs/ 2>/dev/null | xargs -r sed -i 's|perflog.h|linux/log/perflog.h|g' || true
-
-          # ── Fix 7: FULL Samsung Security Neutralization (DEEP KILL) ─
-          echo ">> Killing Samsung Security layers..."
-          grep -rl "defex" security/ drivers/ 2>/dev/null | xargs -r sed -i 's/-EPERM/0/g' || true
-          grep -rl "rkp" arch/arm64 security/ 2>/dev/null | xargs -r sed -i 's/return -1/return 0/g' || true
-          grep -rl "proca" security/ 2>/dev/null | xargs -r sed -i 's/return -1/return 0/g' || true
-          grep -rl "tima" security/ 2>/dev/null | xargs -r sed -i 's/-EPERM/0/g' || true
-          grep -rl "knox" security/ 2>/dev/null | xargs -r sed -i 's/return -EPERM/return 0/g' || true
-
-      - name: 6. Cấu hình & Biên dịch (High-Efficiency Engine)
+      - name: Build kernel with smart toolchain fallback
+        id: build
+        shell: bash
         run: |
+          set -euxo pipefail
           cd kernel
-          # Clean out dir để tránh race condition
-          rm -rf out && mkdir -p out
-          
-          # Tìm defconfig thông minh (Bỏ qua thư mục)
-          REL_DEFCONFIG=$(find arch/arm64/configs -type f -name "*a52sxq*defconfig" -printf "%f\n" | head -n 1)
-          if [ -z "$REL_DEFCONFIG" ]; then
-            REL_DEFCONFIG=$(find arch/arm64/configs -type f -name "*defconfig" | grep -iE "a52|sm7325" | head -n 1 | xargs -r basename)
-          fi
-          if [ -z "$REL_DEFCONFIG" ]; then
-            REL_DEFCONFIG=$(grep -rl "CONFIG_ARCH_SM7325" arch/arm64/configs --include="*defconfig" 2>/dev/null | head -n 1 | xargs -r basename)
-          fi
-          [ -z "$REL_DEFCONFIG" ] && { echo "❌ ERROR: No defconfig found!"; exit 1; }
-          echo ">> Target Defconfig: $REL_DEFCONFIG"
 
-          # KARGS mảng để shell không tách nhầm CC="ccache clang"
-          KARGS=(
-            O=out
-            ARCH=arm64
-            CC="${{ env.CC }}"
-            LD=ld.lld
-            LLVM=1
-            LLVM_IAS=1
-            CROSS_COMPILE=aarch64-linux-gnu-
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-            CLANG_TRIPLE=aarch64-linux-gnu-
-          )
+          mkdir -p "${CCACHE_DIR}"
+          ccache -M 6G || true
+          ccache -z || true
 
-          make "${KARGS[@]}" "$REL_DEFCONFIG"
-          
-          # Tắt bảo mật Samsung tại config
-          if [ -f "scripts/config" ]; then
-            ./scripts/config --file out/.config \
-              -e KSU -e KSU_MANUAL_HOOK -e KPM -e KALLSYMS -d KALLSYMS_ALL \
-              -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT \
-              -e KSU_SUSFS_SUS_KSTAT -e KSU_SUSFS_SUS_OVERLAYFS -e KSU_SUSFS_TRY_UMOUNT \
-              -e SECTION_MISMATCH_WARN_ONLY -d DEBUG_INFO -e KPROBES -e HAVE_KPROBES -e MODULES \
-              -d SECURITY_DEFEX -d SECURITY_SELINUX_DEVELOP -d SECURITY_KNOX \
-              -d SECURITY_RKP -d PROCA -d FIVE -d KNOX_KAP \
-              --set-str LOCALVERSION ""
-          fi
+          export KBUILD_BUILD_USER="github-actions"
+          export KBUILD_BUILD_HOST="ubuntu-24.04"
+          export LOCALVERSION="-${{ github.event.inputs.kernel_name }}-$(date +%Y%m%d-%H%M)"
+          export CROSS_COMPILE="aarch64-linux-gnu-"
+          export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
 
-          make "${KARGS[@]}" olddefconfig
-          
-          echo ">> Final Production Build (CPU Guard)..."
-          export KBUILD_BUILD_USER=ci
-          export KBUILD_BUILD_HOST=github
-          
-          # Biên dịch chính thức + Smart Error Log
-          if ! make -j$(nproc --ignore=1) "${KARGS[@]}" KCFLAGS="-Wno-error" KBUILD_WERROR=0 Image.gz-dtb Image; then
-            echo "❌❌❌ BUILD THẤT BẠI — TRÍCH XUẤT SMART ERROR LOG ❌❌❌"
-            make -j1 "${KARGS[@]}" 2>&1 | tee ../build.log
-            grep -i -C 5 "error:" ../build.log | tail -n 100
+          build_once() {
+            local tag="$1"
+            local cc_bin="$2"
+            local ld_bin="$3"
+            local out_dir="${{ steps.cfg.outputs.out_dir }}"
+
+            rm -rf "${out_dir}"
+            mkdir -p "${out_dir}"
+
+            echo "::group::${tag} defconfig"
+            stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" \
+              ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
+              CC="${cc_bin}" LD="${ld_bin}" \
+              CLANG_TRIPLE="aarch64-linux-gnu-" \
+              CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
+              "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/build-${tag}-defconfig.log"
+            echo "::endgroup::"
+
+            echo "::group::${tag} kernel build"
+            stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" -j"$(nproc --all)" \
+              ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
+              CC="${cc_bin}" LD="${ld_bin}" \
+              CLANG_TRIPLE="aarch64-linux-gnu-" \
+              CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
+              2>&1 | tee "${GITHUB_WORKSPACE}/build-${tag}.log"
+            echo "::endgroup::"
+          }
+
+          if build_once "llvm18" "ccache clang" "ld.lld"; then
+            echo "toolchain=llvm18" >> "${GITHUB_OUTPUT}"
+          elif build_once "llvm14" "ccache clang-14" "ld.lld-14"; then
+            echo "toolchain=llvm14" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::error::All toolchain attempts failed"
             exit 1
           fi
 
-      - name: 7. Đóng gói AnyKernel3 (A52s Optimized Release)
-        if: success()
+          test -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image"
+
+          echo "::group::Produced kernel artifacts"
+          find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -maxdepth 6 \
+            \( -name 'Image' -o -name 'dtbo.img' -o -name '*.dtb' \) -print | sort
+          echo "::endgroup::"
+
+          ccache -s || true
+
+      - name: Print core build errors to console
+        if: ${{ failure() }}
+        shell: bash
         run: |
-          IMG="kernel/out/arch/arm64/boot/Image"
-          GZDTB="kernel/out/arch/arm64/boot/Image.gz-dtb"
-          [ -f "$IMG" ] || { echo "❌ Image missing!"; exit 1; }
-          
-          # Sử dụng fork AnyKernel3 chuẩn cho SM7325 (A52s)
-          git clone --depth=1 --single-branch --branch master https://github.com/SM7325-AE/AnyKernel3.git AnyKernel3
-          
-          cp "$IMG" AnyKernel3/
-          [ -f "$GZDTB" ] && cp "$GZDTB" AnyKernel3/ || echo ">> Image.gz-dtb missing, using plain Image."
-          
-          cd AnyKernel3
-          sed -i 's/kernel.string=.*/kernel.string=SukiSU-Ultra A52s (Elite Stealth)/g' anykernel.sh
-          sed -i 's/do.devicecheck=.*/do.devicecheck=1/g' anykernel.sh
-          sed -i 's/device.name1=.*/device.name1=a52sxq/g' anykernel.sh
-          sed -i 's|block=.*;|block=auto;|g' anykernel.sh
-          
-          zip -r9 -q ../Kernel-A52s-SukiSU-Elite.zip *
+          set +e
+          echo "::group::Core error extractor"
+          python3 - <<'PY'
+          import glob, os, re
 
-      - name: 8. Upload Artifacts
-        if: success()
+          patterns = [
+              re.compile(r"fatal error:.*", re.I),
+              re.compile(r"error:.*", re.I),
+              re.compile(r"undefined reference to.*", re.I),
+              re.compile(r"No rule to make target.*", re.I),
+              re.compile(r"not found", re.I),
+              re.compile(r"FAILED:.*", re.I),
+          ]
+
+          logs = sorted(glob.glob("/home/runner/work/*/*/build-*.log")) + sorted(glob.glob("build-*.log"))
+          logs = sorted(set(logs))
+          if not logs:
+              print("No build log found.")
+              raise SystemExit(0)
+
+          for path in logs:
+              print(f"===== {os.path.basename(path)} =====")
+              try:
+                  with open(path, "r", errors="ignore") as f:
+                      lines = f.readlines()
+              except Exception as e:
+                  print(f"Cannot read {path}: {e}")
+                  continue
+
+              hits = []
+              for idx, line in enumerate(lines):
+                  if any(p.search(line) for p in patterns):
+                      hits.append(idx)
+
+              if not hits:
+                  tail = lines[-120:]
+                  print("No core error matched. Showing last 120 lines:")
+                  print("".join(tail))
+                  continue
+
+              shown = set()
+              for idx in hits[-8:]:
+                  start = max(0, idx - 6)
+                  end = min(len(lines), idx + 7)
+                  key = (start, end)
+                  if key in shown:
+                      continue
+                  shown.add(key)
+                  print(f"--- context lines {start+1}-{end} ---")
+                  for no in range(start, end):
+                      print(f"{no+1:06d}: {lines[no].rstrip()}")
+                  print()
+          PY
+          echo "::endgroup::"
+
+      - name: Write build summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "## SM7325 build summary"
+            echo
+            echo "- Branch: \`${{ github.event.inputs.kernel_branch }}\`"
+            echo "- Region: \`${{ github.event.inputs.region }}\`"
+            echo "- Mode: \`${{ github.event.inputs.sukisu_mode }}\`"
+            echo "- Defconfig: \`${{ steps.cfg.outputs.defconfig }}\`"
+            echo "- Toolchain: \`${{ steps.build.outputs.toolchain || 'failed-before-success' }}\`"
+            echo
+            echo "### Last log tail"
+            echo '```text'
+            LAST_LOG="$(ls -1t "${GITHUB_WORKSPACE}"/build-*.log 2>/dev/null | head -n1 || true)"
+            if [ -n "${LAST_LOG}" ]; then
+              tail -n 120 "${LAST_LOG}"
+            else
+              echo "No build log generated."
+            fi
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Prepare AnyKernel3 package for a52sxq
+        id: pack
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          git clone --depth=1 "${ANYKERNEL_REPO}" AnyKernel3
+
+          sed -i \
+            -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|" \
+            -e 's|^device.name1=.*|device.name1=a52sxq|' \
+            -e 's|^supported.versions=.*|supported.versions=16|' \
+            AnyKernel3/anykernel.sh
+
+          grep -q '^device.name2=' AnyKernel3/anykernel.sh \
+            && sed -i 's|^device.name2=.*|device.name2=a52sxqzt|' AnyKernel3/anykernel.sh \
+            || sed -i '/^device.name1=.*/a device.name2=a52sxqzt' AnyKernel3/anykernel.sh
+
+          grep -q '^device.name3=' AnyKernel3/anykernel.sh \
+            && sed -i 's|^device.name3=.*|device.name3=a52sxqks|' AnyKernel3/anykernel.sh \
+            || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
+
+          cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
+
+          if [ -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" ]; then
+            cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" AnyKernel3/dtbo.img
+          fi
+
+          DTB_FILE="$(find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -type f -name 'yupik*.dtb' | sort | head -n1)"
+          if [ -z "${DTB_FILE}" ]; then
+            DTB_FILE="$(find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -type f -name '*.dtb' | sort | head -n1)"
+          fi
+          [ -n "${DTB_FILE}" ] && cp "${DTB_FILE}" AnyKernel3/dtb || true
+
+          ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
+          (
+            cd AnyKernel3
+            zip -r9 "../${ZIP_NAME}" . \
+              -x '.git/*' \
+                 'README.md' \
+                 '*.gitignore'
+          )
+
+          echo "zip_name=${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Pack debug bundle
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p debug
+          cp -f build-*.log debug/ 2>/dev/null || true
+          cp -f kernel/.gitmodules debug/gitmodules.after 2>/dev/null || true
+          cp -f "${{ steps.cfg.outputs.defconfig_path }}" debug/defconfig.after 2>/dev/null || true
+          cp -f AnyKernel3/anykernel.sh debug/anykernel.sh.after 2>/dev/null || true
+
+      - name: Upload flashable AnyKernel3 zip
+        if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-SukiSU-A52s-Elite
-          path: Kernel-A52s-SukiSU-Elite.zip
-          retention-days: 7
+          name: ${{ steps.pack.outputs.zip_name }}
+          path: ${{ github.workspace }}/${{ steps.pack.outputs.zip_name }}
+          if-no-files-found: error
 
-      - name: 9. Upload Failure Log
-        if: failure()
+      - name: Upload debug logs
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-failure
-          path: build.log
-          retention-days: 3
+          name: sm7325-debug-${{ github.run_id }}
+          path: debug/
+          if-no-files-found: warn
 
-      - name: 10. Auto Release (Deterministic)
-        if: success()
-        uses: softprops/action-gh-release@v2
+      - name: Create patched source archive
+        if: ${{ success() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
+        shell: bash
+        run: |
+          tar --exclude='.git' -caf patched-sm7325-source.tar.zst kernel
+
+      - name: Upload patched source artifact
+        if: ${{ success() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: build-${{ github.sha }}
-          name: SukiSU Ultra — A52s (CI-${{ github.run_number }})
-          body: |
-            ### 🚀 Production Kernel Build Successfully
-            - **Device**: Samsung A52s 5G (a52sxq)
-            - **Root**: SukiSU Ultra (149f65fa)
-            - **Security**: Full Deep-Kill (Neutralized)
-            - **Toolchain**: Pinned Proton Clang (5b7c6e3)
-            - **Reproducibility**: SHA Pinned Build
-          files: Kernel-A52s-SukiSU-Elite.zip
+          name: patched-sm7325-source-${{ github.run_id }}
+          path: patched-sm7325-source.tar.zst
+          if-no-files-found: error
