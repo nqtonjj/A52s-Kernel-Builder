@@ -73,12 +73,7 @@ jobs:
           LOG="${GITHUB_WORKSPACE}/01-deps.log"
           exec > >(tee -a "${LOG}") 2>&1
           sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential ccache cpio curl device-tree-compiler file flex gawk git jq \
-            libelf-dev libssl-dev lld llvm clang clang-14 lld-14 llvm-14 \
-            pahole patch python3 rsync unzip xz-utils zip zstd \
-            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          sudo apt-get install -y             bc bison build-essential ccache cpio curl device-tree-compiler file flex gawk git jq             libelf-dev libssl-dev lld llvm clang clang-14 lld-14 llvm-14             pahole patch python3 rsync unzip xz-utils zip zstd             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
           clang --version || true
           clang-14 --version || true
 
@@ -86,7 +81,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-v3
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-v4
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -141,7 +136,9 @@ jobs:
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
 
           sed -i '/kernelsu\//d' drivers/Makefile
-          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          printf '
+obj-$(CONFIG_KSU) += kernelsu/
+' >> drivers/Makefile
 
           sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
@@ -160,6 +157,95 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
+          fix_fd_c_for_susfs() {
+            python3 - <<'PY'
+from pathlib import Path
+import re
+
+p = Path("fs/proc/fd.c")
+s = p.read_text()
+
+if "CONFIG_KSU_SUSFS_SUS_MOUNT" not in s:
+    s = s.replace(
+        '#include "../mount.h"\n',
+        '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs.h>\n#endif\n\n#include "../mount.h"\n',
+        1
+    )
+
+s = s.replace(
+    "struct task_struct *task;\n",
+    "struct task_struct *task;\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tstruct mount *mnt = NULL;\n#endif\n",
+    1
+)
+
+old = '''\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\n",
+\t\t   (long long)file->f_pos, f_flags,
+\t\t   real_mount(file->f_path.mnt)->mnt_id);'''
+new = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+\tmnt = real_mount(file->f_path.mnt);
+\tif (likely(current->susfs_task_state & TASK_STRUCT_NON_ROOT_USER_APP_PROC) &&
+\t    mnt->mnt_id >= DEFAULT_SUS_MNT_ID) {
+\t\tstruct path path;
+\t\tchar *pathname = kmalloc(PAGE_SIZE, GFP_KERNEL);
+\t\tchar *dpath;
+
+\t\tfor (; mnt->mnt_id >= DEFAULT_SUS_MNT_ID; mnt = mnt->mnt_parent) { }
+
+\t\tif (!pathname)
+\t\t\tgoto out_seq_printf;
+
+\t\tdpath = d_path(&file->f_path, pathname, PAGE_SIZE);
+\t\tif (!dpath)
+\t\t\tgoto out_free_pathname;
+
+\t\tif (kern_path(dpath, 0, &path))
+\t\t\tgoto out_free_pathname;
+
+\t\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
+\t\t\t   (long long)file->f_pos, f_flags,
+\t\t\t   mnt->mnt_id,
+\t\t\t   path.dentry->d_inode->i_ino);
+\t\tpath_put(&path);
+\t\tkfree(pathname);
+\t\tgoto bypass_orig_flow;
+
+out_free_pathname:
+\t\tkfree(pathname);
+\t}
+out_seq_printf:
+\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
+\t\t   (long long)file->f_pos, f_flags,
+\t\t   mnt->mnt_id,
+\t\t   file_inode(file)->i_ino);
+bypass_orig_flow:
+#else
+\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
+\t\t   (long long)file->f_pos, f_flags,
+\t\t   real_mount(file->f_path.mnt)->mnt_id,
+\t\t   file_inode(file)->i_ino);
+#endif'''
+
+if old in s:
+    s = s.replace(old, new, 1)
+else:
+    pattern = re.compile(
+        r'\tseq_printf\(m,\s*"pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\n",\s*'
+        r'\(long long\)file->f_pos,\s*f_flags,\s*'
+        r'real_mount\(file->f_path\.mnt\)->mnt_id\);',
+        re.M
+    )
+    s, n = pattern.subn(new, s, count=1)
+    if n == 0:
+        raise SystemExit("fd.c fallback patch could not locate seq_printf target")
+
+if "CONFIG_KSU_SUSFS_SUS_MOUNT" not in s or 'ino:\\t%lu\\n' not in s:
+    raise SystemExit("fd.c fallback patch verification failed")
+
+p.write_text(s)
+print("fd.c fallback SUSFS patch applied")
+PY
+          }
+
           rm -rf ../susfs4ksu
           git clone --depth=1 -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
 
@@ -177,20 +263,25 @@ jobs:
             PATCH_RC=${PIPESTATUS[0]}
             set -e
 
-            REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
-            if [ "${REJ_COUNT}" != "0" ]; then
+            REJ_LIST="$(find . -type f -name '*.rej' | sort || true)"
+            REJ_COUNT="$(printf '%s\n' "${REJ_LIST}" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+            if [ "${REJ_COUNT}" = "1" ] && printf '%s\n' "${REJ_LIST}" | grep -qx './fs/proc/fd.c.rej'; then
+              echo "::warning::Only fs/proc/fd.c rejected; applying non-interactive fallback patch"
+              fix_fd_c_for_susfs
+              rm -f ./fs/proc/fd.c.rej
+            elif [ "${REJ_COUNT}" != "0" ]; then
               echo "::error::SUSFS kernel patch left ${REJ_COUNT} reject file(s)"
-              find . -type f -name '*.rej' -print
+              printf '%s\n' "${REJ_LIST}"
               exit 1
             fi
 
             if [ "${PATCH_RC}" != "0" ]; then
-              echo "::warning::patch exited with code ${PATCH_RC} but no .rej was produced; continuing"
+              echo "::warning::patch exited with code ${PATCH_RC}; continuing because no unrecovered reject remains"
             fi
           fi
 
-          grep -q '<linux/stat.h>' include/linux/susfs.h || \
-            sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
+          grep -q '<linux/stat.h>' include/linux/susfs.h ||             sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
 
           test -f include/linux/susfs.h || {
             echo "::error::include/linux/susfs.h missing"
@@ -202,8 +293,13 @@ jobs:
             exit 1
           }
 
+          test ! -f fs/proc/fd.c.rej || {
+            echo "::error::fs/proc/fd.c.rej still exists after fallback"
+            exit 1
+          }
+
           echo "::group::SUSFS inventory"
-          ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c
+          ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c fs/proc/fd.c
           echo "::endgroup::"
 
       - name: Patch A52s defconfig and disable Samsung security gates
@@ -232,24 +328,7 @@ jobs:
           disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
           disable_cfg CONFIG_KSU_NONE_HOOK
 
-          for key in \
-            CONFIG_SECURITY_DEFEX \
-            CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
-            CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
-            CONFIG_SECURITY_PROCA \
-            CONFIG_PROCA \
-            CONFIG_RKP \
-            CONFIG_RKP_CFP \
-            CONFIG_RKP_NS_PROT \
-            CONFIG_RKP_KDP \
-            CONFIG_TIMA \
-            CONFIG_TIMA_RKP \
-            CONFIG_TIMA_SECBOOT \
-            CONFIG_TIMA_LKMAUTH \
-            CONFIG_KNOX \
-            CONFIG_KNOX_GUARD \
-            CONFIG_SEC_RESTRICT_SETUID \
-            CONFIG_SEC_RESTRICT_ROOTING
+          for key in             CONFIG_SECURITY_DEFEX             CONFIG_SECURITY_DEFEX_RESTRICT_FILE             CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL             CONFIG_SECURITY_PROCA             CONFIG_PROCA             CONFIG_RKP             CONFIG_RKP_CFP             CONFIG_RKP_NS_PROT             CONFIG_RKP_KDP             CONFIG_TIMA             CONFIG_TIMA_RKP             CONFIG_TIMA_SECBOOT             CONFIG_TIMA_LKMAUTH             CONFIG_KNOX             CONFIG_KNOX_GUARD             CONFIG_SEC_RESTRICT_SETUID             CONFIG_SEC_RESTRICT_ROOTING
           do
             disable_cfg "${key}"
           done
@@ -286,19 +365,9 @@ jobs:
             rm -rf "${out_dir}"
             mkdir -p "${out_dir}"
 
-            stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" \
-              ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
-              CC="${cc_bin}" LD="${ld_bin}" \
-              CLANG_TRIPLE="aarch64-linux-gnu-" \
-              CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
-              "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+            stdbuf -oL -eL make -C "${PWD}" O="${out_dir}"               ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}"               CC="${cc_bin}" LD="${ld_bin}"               CLANG_TRIPLE="aarch64-linux-gnu-"               CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}"               "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
 
-            stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" -j"$(nproc --all)" \
-              ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
-              CC="${cc_bin}" LD="${ld_bin}" \
-              CLANG_TRIPLE="aarch64-linux-gnu-" \
-              CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
-              2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
+            stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" -j"$(nproc --all)"               ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}"               CC="${cc_bin}" LD="${ld_bin}"               CLANG_TRIPLE="aarch64-linux-gnu-"               CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}"               2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
           if build_once "llvm18" "ccache clang" "ld.lld"; then
@@ -325,18 +394,11 @@ jobs:
 
           git clone --depth=1 "${ANYKERNEL_REPO}" AnyKernel3
 
-          sed -i \
-            -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|" \
-            -e 's|^device.name1=.*|device.name1=a52sxq|' \
-            AnyKernel3/anykernel.sh
+          sed -i             -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|"             -e 's|^device.name1=.*|device.name1=a52sxq|'             AnyKernel3/anykernel.sh
 
-          grep -q '^device.name2=' AnyKernel3/anykernel.sh \
-            && sed -i 's|^device.name2=.*|device.name2=a52sxqzt|' AnyKernel3/anykernel.sh \
-            || sed -i '/^device.name1=.*/a device.name2=a52sxqzt' AnyKernel3/anykernel.sh
+          grep -q '^device.name2=' AnyKernel3/anykernel.sh             && sed -i 's|^device.name2=.*|device.name2=a52sxqzt|' AnyKernel3/anykernel.sh             || sed -i '/^device.name1=.*/a device.name2=a52sxqzt' AnyKernel3/anykernel.sh
 
-          grep -q '^device.name3=' AnyKernel3/anykernel.sh \
-            && sed -i 's|^device.name3=.*|device.name3=a52sxqks|' AnyKernel3/anykernel.sh \
-            || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
+          grep -q '^device.name3=' AnyKernel3/anykernel.sh             && sed -i 's|^device.name3=.*|device.name3=a52sxqks|' AnyKernel3/anykernel.sh             || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
 
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
 
@@ -353,11 +415,7 @@ jobs:
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
-            zip -r9 "../${ZIP_NAME}" . \
-              -x '.git/*' \
-                 '.github/*' \
-                 'README.md' \
-                 '*.gitignore'
+            zip -r9 "../${ZIP_NAME}" .               -x '.git/*'                  '.github/*'                  'README.md'                  '*.gitignore'
           )
 
           echo "zip_name=${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
@@ -369,51 +427,52 @@ jobs:
           set +e
           echo "::group::Core error extractor"
           python3 - <<'PY'
-          import glob, os, re
+import glob, os, re
 
-          patterns = [
-              re.compile(r"fatal error:.*", re.I),
-              re.compile(r"\berror:.*", re.I),
-              re.compile(r"undefined reference to.*", re.I),
-              re.compile(r"No rule to make target.*", re.I),
-              re.compile(r"FAILED:.*", re.I),
-              re.compile(r"patching file .*", re.I),
-              re.compile(r"Hunk #\d+ .*FAILED", re.I),
-              re.compile(r"can't find remote ref.*", re.I),
-              re.compile(r"can't find file to patch.*", re.I),
-              re.compile(r"reject file", re.I),
-              re.compile(r"missing", re.I),
-              re.compile(r"not found", re.I),
-              re.compile(r"warning:.*", re.I),
-              re.compile(r"fatal:.*", re.I),
-          ]
+patterns = [
+    re.compile(r"fatal error:.*", re.I),
+    re.compile(r"\berror:.*", re.I),
+    re.compile(r"undefined reference to.*", re.I),
+    re.compile(r"No rule to make target.*", re.I),
+    re.compile(r"FAILED:.*", re.I),
+    re.compile(r"patching file .*", re.I),
+    re.compile(r"Hunk #\d+ .*FAILED", re.I),
+    re.compile(r"can't find remote ref.*", re.I),
+    re.compile(r"can't find file to patch.*", re.I),
+    re.compile(r"reject file", re.I),
+    re.compile(r"\.rej", re.I),
+    re.compile(r"missing", re.I),
+    re.compile(r"not found", re.I),
+    re.compile(r"warning:.*", re.I),
+    re.compile(r"fatal:.*", re.I),
+]
 
-          logs = sorted(set(glob.glob("*.log") + glob.glob("debug/**/*.log", recursive=True)))
-          if not logs:
-              print("No step logs found.")
-          for path in logs:
-              print(f"===== {os.path.basename(path)} =====")
-              with open(path, "r", errors="ignore") as f:
-                  lines = f.readlines()
-              hits = []
-              for idx, line in enumerate(lines):
-                  if any(p.search(line) for p in patterns):
-                      hits.append(idx)
-              if not hits:
-                  tail = lines[-80:]
-                  start_no = max(1, len(lines) - len(tail) + 1)
-                  for i, line in enumerate(tail, start=start_no):
-                      print(f"{i:06d}: {line.rstrip()}")
-                  print()
-                  continue
-              for idx in hits[-16:]:
-                  start = max(0, idx - 6)
-                  end = min(len(lines), idx + 7)
-                  print(f"--- context lines {start+1}-{end} ---")
-                  for no in range(start, end):
-                      print(f"{no+1:06d}: {lines[no].rstrip()}")
-                  print()
-          PY
+logs = sorted(set(glob.glob("*.log") + glob.glob("debug/**/*.log", recursive=True)))
+if not logs:
+    print("No step logs found.")
+for path in logs:
+    print(f"===== {os.path.basename(path)} =====")
+    with open(path, "r", errors="ignore") as f:
+        lines = f.readlines()
+    hits = []
+    for idx, line in enumerate(lines):
+        if any(p.search(line) for p in patterns):
+            hits.append(idx)
+    if not hits:
+        tail = lines[-80:]
+        start_no = max(1, len(lines) - len(tail) + 1)
+        for i, line in enumerate(tail, start=start_no):
+            print(f"{i:06d}: {line.rstrip()}")
+        print()
+        continue
+    for idx in hits[-16:]:
+        start = max(0, idx - 6)
+        end = min(len(lines), idx + 7)
+        print(f"--- context lines {start+1}-{end} ---")
+        for no in range(start, end):
+            print(f"{no+1:06d}: {lines[no].rstrip()}")
+        print()
+PY
           echo "::endgroup::"
 
       - name: Write job summary
