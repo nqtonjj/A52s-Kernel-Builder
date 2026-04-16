@@ -169,17 +169,17 @@ jobs:
             if ! grep -q 'susfs_fd_link' "${target}"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "${target}"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
-\
-#ifdef CONFIG_KSU_SUSFS\
-\	susfs_fd_link(path, &inode, &mnt, &dentry);\
-#endif
+                \
+                #ifdef CONFIG_KSU_SUSFS\
+                \	susfs_fd_link(path, &inode, &mnt, &dentry);\
+                #endif
                 }' "${target}"
               elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "${target}"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
-\
-#ifdef CONFIG_KSU_SUSFS\
-\	susfs_fd_link(path, &inode, &mnt, &dentry);\
-#endif
+                \
+                #ifdef CONFIG_KSU_SUSFS\
+                \	susfs_fd_link(path, &inode, &mnt, &dentry);\
+                #endif
                 }' "${target}"
               else
                 echo "::error::Could not locate proc_fd_link signature in ${target}"
@@ -381,16 +381,11 @@ jobs:
           {
             echo "## SM7325 A52s SukiSU/SUSFS build summary"
             echo
-            echo "- kernel_branch: \
-`${{ github.event.inputs.kernel_branch }}`"
-            echo "- region: \
-`${{ github.event.inputs.region }}`"
-            echo "- sukisu_ref: \
-`${{ env.SUKISU_REF }}`"
-            echo "- defconfig: \
-`${{ steps.cfg.outputs.defconfig || 'unresolved' }}`"
-            echo "- toolchain: \
-`${{ steps.build.outputs.toolchain || 'failed-before-build' }}`"
+            echo "- kernel_branch: \`${{ github.event.inputs.kernel_branch }}\`"
+            echo "- region: \`${{ github.event.inputs.region }}\`"
+            echo "- sukisu_ref: \`${{ env.SUKISU_REF }}\`"
+            echo "- defconfig: \`${{ steps.cfg.outputs.defconfig || 'unresolved' }}\`"
+            echo "- toolchain: \`${{ steps.build.outputs.toolchain || 'failed-before-build' }}\`"
             echo
             echo "### Tail of all logs"
             echo '```text'
