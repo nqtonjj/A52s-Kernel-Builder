@@ -136,9 +136,7 @@ jobs:
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
 
           sed -i '/kernelsu\//d' drivers/Makefile
-          printf '
-obj-$(CONFIG_KSU) += kernelsu/
-' >> drivers/Makefile
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
 
           sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
@@ -159,91 +157,91 @@ obj-$(CONFIG_KSU) += kernelsu/
 
           fix_fd_c_for_susfs() {
             python3 - <<'PY'
-from pathlib import Path
-import re
-
-p = Path("fs/proc/fd.c")
-s = p.read_text()
-
-if "CONFIG_KSU_SUSFS_SUS_MOUNT" not in s:
-    s = s.replace(
-        '#include "../mount.h"\n',
-        '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs.h>\n#endif\n\n#include "../mount.h"\n',
-        1
-    )
-
-s = s.replace(
-    "struct task_struct *task;\n",
-    "struct task_struct *task;\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tstruct mount *mnt = NULL;\n#endif\n",
-    1
-)
-
-old = '''\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\n",
-\t\t   (long long)file->f_pos, f_flags,
-\t\t   real_mount(file->f_path.mnt)->mnt_id);'''
-new = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-\tmnt = real_mount(file->f_path.mnt);
-\tif (likely(current->susfs_task_state & TASK_STRUCT_NON_ROOT_USER_APP_PROC) &&
-\t    mnt->mnt_id >= DEFAULT_SUS_MNT_ID) {
-\t\tstruct path path;
-\t\tchar *pathname = kmalloc(PAGE_SIZE, GFP_KERNEL);
-\t\tchar *dpath;
-
-\t\tfor (; mnt->mnt_id >= DEFAULT_SUS_MNT_ID; mnt = mnt->mnt_parent) { }
-
-\t\tif (!pathname)
-\t\t\tgoto out_seq_printf;
-
-\t\tdpath = d_path(&file->f_path, pathname, PAGE_SIZE);
-\t\tif (!dpath)
-\t\t\tgoto out_free_pathname;
-
-\t\tif (kern_path(dpath, 0, &path))
-\t\t\tgoto out_free_pathname;
-
-\t\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
-\t\t\t   (long long)file->f_pos, f_flags,
-\t\t\t   mnt->mnt_id,
-\t\t\t   path.dentry->d_inode->i_ino);
-\t\tpath_put(&path);
-\t\tkfree(pathname);
-\t\tgoto bypass_orig_flow;
-
-out_free_pathname:
-\t\tkfree(pathname);
-\t}
-out_seq_printf:
-\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
-\t\t   (long long)file->f_pos, f_flags,
-\t\t   mnt->mnt_id,
-\t\t   file_inode(file)->i_ino);
-bypass_orig_flow:
-#else
-\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
-\t\t   (long long)file->f_pos, f_flags,
-\t\t   real_mount(file->f_path.mnt)->mnt_id,
-\t\t   file_inode(file)->i_ino);
-#endif'''
-
-if old in s:
-    s = s.replace(old, new, 1)
-else:
-    pattern = re.compile(
-        r'\tseq_printf\(m,\s*"pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\n",\s*'
-        r'\(long long\)file->f_pos,\s*f_flags,\s*'
-        r'real_mount\(file->f_path\.mnt\)->mnt_id\);',
-        re.M
-    )
-    s, n = pattern.subn(new, s, count=1)
-    if n == 0:
-        raise SystemExit("fd.c fallback patch could not locate seq_printf target")
-
-if "CONFIG_KSU_SUSFS_SUS_MOUNT" not in s or 'ino:\\t%lu\\n' not in s:
-    raise SystemExit("fd.c fallback patch verification failed")
-
-p.write_text(s)
-print("fd.c fallback SUSFS patch applied")
-PY
+            from pathlib import Path
+            import re
+            
+            p = Path("fs/proc/fd.c")
+            s = p.read_text()
+            
+            if "CONFIG_KSU_SUSFS_SUS_MOUNT" not in s:
+                s = s.replace(
+                    '#include "../mount.h"\n',
+                    '#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs.h>\n#endif\n\n#include "../mount.h"\n',
+                    1
+                )
+            
+            s = s.replace(
+                "struct task_struct *task;\n",
+                "struct task_struct *task;\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tstruct mount *mnt = NULL;\n#endif\n",
+                1
+            )
+            
+            old = '''\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\n",
+            \t\t   (long long)file->f_pos, f_flags,
+            \t\t   real_mount(file->f_path.mnt)->mnt_id);'''
+            new = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+            \tmnt = real_mount(file->f_path.mnt);
+            \tif (likely(current->susfs_task_state & TASK_STRUCT_NON_ROOT_USER_APP_PROC) &&
+            \t    mnt->mnt_id >= DEFAULT_SUS_MNT_ID) {
+            \t\tstruct path path;
+            \t\tchar *pathname = kmalloc(PAGE_SIZE, GFP_KERNEL);
+            \t\tchar *dpath;
+            
+            \t\tfor (; mnt->mnt_id >= DEFAULT_SUS_MNT_ID; mnt = mnt->mnt_parent) { }
+            
+            \t\tif (!pathname)
+            \t\t\tgoto out_seq_printf;
+            
+            \t\tdpath = d_path(&file->f_path, pathname, PAGE_SIZE);
+            \t\tif (!dpath)
+            \t\t\tgoto out_free_pathname;
+            
+            \t\tif (kern_path(dpath, 0, &path))
+            \t\t\tgoto out_free_pathname;
+            
+            \t\tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
+            \t\t\t   (long long)file->f_pos, f_flags,
+            \t\t\t   mnt->mnt_id,
+            \t\t\t   path.dentry->d_inode->i_ino);
+            \t\tpath_put(&path);
+            \t\tkfree(pathname);
+            \t\tgoto bypass_orig_flow;
+            
+            out_free_pathname:
+            \t\tkfree(pathname);
+            \t}
+            out_seq_printf:
+            \tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
+            \t\t   (long long)file->f_pos, f_flags,
+            \t\t   mnt->mnt_id,
+            \t\t   file_inode(file)->i_ino);
+            bypass_orig_flow:
+            #else
+            \tseq_printf(m, "pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\nino:\\t%lu\\n",
+            \t\t   (long long)file->f_pos, f_flags,
+            \t\t   real_mount(file->f_path.mnt)->mnt_id,
+            \t\t   file_inode(file)->i_ino);
+            #endif'''
+            
+            if old in s:
+                s = s.replace(old, new, 1)
+            else:
+                pattern = re.compile(
+                    r'\tseq_printf\(m,\s*"pos:\\t%lli\\nflags:\\t0%o\\nmnt_id:\\t%i\\n",\s*'
+                    r'\(long long\)file->f_pos,\s*f_flags,\s*'
+                    r'real_mount\(file->f_path\.mnt\)->mnt_id\);',
+                    re.M
+                )
+                s, n = pattern.subn(new, s, count=1)
+                if n == 0:
+                    raise SystemExit("fd.c fallback patch could not locate seq_printf target")
+            
+            if "CONFIG_KSU_SUSFS_SUS_MOUNT" not in s or 'ino:\\t%lu\\n' not in s:
+                raise SystemExit("fd.c fallback patch verification failed")
+            
+            p.write_text(s)
+            print("fd.c fallback SUSFS patch applied")
+            PY
           }
 
           rm -rf ../susfs4ksu
@@ -427,52 +425,52 @@ PY
           set +e
           echo "::group::Core error extractor"
           python3 - <<'PY'
-import glob, os, re
-
-patterns = [
-    re.compile(r"fatal error:.*", re.I),
-    re.compile(r"\berror:.*", re.I),
-    re.compile(r"undefined reference to.*", re.I),
-    re.compile(r"No rule to make target.*", re.I),
-    re.compile(r"FAILED:.*", re.I),
-    re.compile(r"patching file .*", re.I),
-    re.compile(r"Hunk #\d+ .*FAILED", re.I),
-    re.compile(r"can't find remote ref.*", re.I),
-    re.compile(r"can't find file to patch.*", re.I),
-    re.compile(r"reject file", re.I),
-    re.compile(r"\.rej", re.I),
-    re.compile(r"missing", re.I),
-    re.compile(r"not found", re.I),
-    re.compile(r"warning:.*", re.I),
-    re.compile(r"fatal:.*", re.I),
-]
-
-logs = sorted(set(glob.glob("*.log") + glob.glob("debug/**/*.log", recursive=True)))
-if not logs:
-    print("No step logs found.")
-for path in logs:
-    print(f"===== {os.path.basename(path)} =====")
-    with open(path, "r", errors="ignore") as f:
-        lines = f.readlines()
-    hits = []
-    for idx, line in enumerate(lines):
-        if any(p.search(line) for p in patterns):
-            hits.append(idx)
-    if not hits:
-        tail = lines[-80:]
-        start_no = max(1, len(lines) - len(tail) + 1)
-        for i, line in enumerate(tail, start=start_no):
-            print(f"{i:06d}: {line.rstrip()}")
-        print()
-        continue
-    for idx in hits[-16:]:
-        start = max(0, idx - 6)
-        end = min(len(lines), idx + 7)
-        print(f"--- context lines {start+1}-{end} ---")
-        for no in range(start, end):
-            print(f"{no+1:06d}: {lines[no].rstrip()}")
-        print()
-PY
+          import glob, os, re
+          
+          patterns = [
+              re.compile(r"fatal error:.*", re.I),
+              re.compile(r"\berror:.*", re.I),
+              re.compile(r"undefined reference to.*", re.I),
+              re.compile(r"No rule to make target.*", re.I),
+              re.compile(r"FAILED:.*", re.I),
+              re.compile(r"patching file .*", re.I),
+              re.compile(r"Hunk #\d+ .*FAILED", re.I),
+              re.compile(r"can't find remote ref.*", re.I),
+              re.compile(r"can't find file to patch.*", re.I),
+              re.compile(r"reject file", re.I),
+              re.compile(r"\.rej", re.I),
+              re.compile(r"missing", re.I),
+              re.compile(r"not found", re.I),
+              re.compile(r"warning:.*", re.I),
+              re.compile(r"fatal:.*", re.I),
+          ]
+          
+          logs = sorted(set(glob.glob("*.log") + glob.glob("debug/**/*.log", recursive=True)))
+          if not logs:
+              print("No step logs found.")
+          for path in logs:
+              print(f"===== {os.path.basename(path)} =====")
+              with open(path, "r", errors="ignore") as f:
+                  lines = f.readlines()
+              hits = []
+              for idx, line in enumerate(lines):
+                  if any(p.search(line) for p in patterns):
+                      hits.append(idx)
+              if not hits:
+                  tail = lines[-80:]
+                  start_no = max(1, len(lines) - len(tail) + 1)
+                  for i, line in enumerate(tail, start=start_no):
+                      print(f"{i:06d}: {line.rstrip()}")
+                  print()
+                  continue
+              for idx in hits[-16:]:
+                  start = max(0, idx - 6)
+                  end = min(len(lines), idx + 7)
+                  print(f"--- context lines {start+1}-{end} ---")
+                  for no in range(start, end):
+                      print(f"{no+1:06d}: {lines[no].rstrip()}")
+                  print()
+          PY
           echo "::endgroup::"
 
       - name: Write job summary
