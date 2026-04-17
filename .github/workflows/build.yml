@@ -92,7 +92,6 @@ jobs:
           
           mkdir -p "${TC_DIR}"
           git clone --depth=1 "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
-          echo "${TC_DIR}/clang-primary/bin" >> "${GITHUB_PATH}"
           
           "${TC_DIR}/clang-primary/bin/clang" --version
           "${TC_DIR}/clang-primary/bin/ld.lld" --version || true
@@ -101,7 +100,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-proton-hostfix-v1
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-proton-hostfix-v2
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -157,6 +156,7 @@ jobs:
           git clone --depth=1 -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
           
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
+          
           sed -i '/kernelsu\//d' drivers/Makefile
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
           
@@ -179,6 +179,7 @@ jobs:
           cd kernel
 
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
+          
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
           done
@@ -219,9 +220,13 @@ jobs:
           while read -r f; do
             [ -f "$f" ] || continue
             sed -i \
-              -e 's/security_inode_init_security_anon(inode, \&qname, context_inode)/security_inode_init_security(inode, context_inode, \&qname, NULL, NULL)/g' \
+              -e 's/security_inode_init_security_anon(inode, \&qname, context_inode)/security_inode_init_security(inode, (struct inode *)context_inode, \&qname, NULL, NULL)/g' \
+              -e 's/security_inode_init_security(inode, context_inode, \&qname, NULL, NULL)/security_inode_init_security(inode, (struct inode *)context_inode, \&qname, NULL, NULL)/g' \
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
+
+          echo ">> file_wrapper compat result"
+          grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
 
       - name: Materialize SUSFS kernel-side patchset
         shell: bash
@@ -392,11 +397,7 @@ jobs:
           ccache -M 8G || true
           ccache -z || true
 
-          export PATH="${TC_DIR}/clang-primary/bin:${PATH}"
-          export HOSTCC="gcc"
-          export HOSTCXX="g++"
-          export HOSTLD="ld.bfd"
-          export HOSTAR="ar"
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
           export KBUILD_BUILD_USER="github-actions"
           export KBUILD_BUILD_HOST="ubuntu-24.04"
           export LOCALVERSION="-${{ github.event.inputs.kernel_name }}-$(date +%Y%m%d-%H%M)"
