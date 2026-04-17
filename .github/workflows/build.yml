@@ -27,7 +27,7 @@ on:
         default: false
 
 concurrency:
-  group: "sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}"
+  group: sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}
   cancel-in-progress: false
 
 jobs:
@@ -37,20 +37,20 @@ jobs:
     permissions:
       contents: read
     env:
-      TZ: "Asia/Bangkok"
-      ARCH: "arm64"
-      ANDROID_MAJOR_VERSION: "u"
+      TZ: Asia/Bangkok
+      ARCH: arm64
+      ANDROID_MAJOR_VERSION: u
       PLATFORM_VERSION: "16"
-      TARGET_BUILD_VARIANT: "user"
-      KERNEL_REPO: "https://github.com/JingMatrix/samsung_sm7325"
-      ANYKERNEL_REPO: "https://github.com/SM7325-AE/AnyKernel3"
-      SUKISU_REPO: "https://github.com/SukiSU-Ultra/SukiSU-Ultra"
-      SUKISU_REF: "main"
-      SUSFS_REPO: "https://gitlab.com/simonpunk/susfs4ksu.git"
-      SUSFS_REF: "kernel-5.4"
-      PROTON_CLANG_REPO: "https://github.com/kdrag0n/proton-clang.git"
-      CCACHE_DIR: "${{ github.workspace }}/.ccache"
-      TC_DIR: "${{ github.workspace }}/toolchains"
+      TARGET_BUILD_VARIANT: user
+      KERNEL_REPO: https://github.com/JingMatrix/samsung_sm7325
+      ANYKERNEL_REPO: https://github.com/SM7325-AE/AnyKernel3
+      SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
+      SUKISU_REF: main
+      SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+      SUSFS_REF: kernel-5.4
+      PROTON_CLANG_REPO: https://github.com/kdrag0n/proton-clang.git
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      TC_DIR: ${{ github.workspace }}/toolchains
 
     steps:
       - name: Checkout workflow repository
@@ -62,7 +62,6 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/00-free-space.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
           docker system prune -af || true
           df -h
@@ -73,14 +72,12 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/01-deps.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential ccache cpio curl device-tree-compiler file flex gawk git jq \
             libelf-dev libssl-dev pahole patch python3 rsync unzip xz-utils zip zstd \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
             gcc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi g++
-            
           gcc --version || true
 
       - name: Setup Proton Clang
@@ -89,11 +86,8 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/01b-toolchain.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           mkdir -p "${TC_DIR}"
           git clone --depth=1 "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
-          
-          echo "${TC_DIR}/clang-primary/bin" >> "${GITHUB_PATH}"
           "${TC_DIR}/clang-primary/bin/clang" --version
           "${TC_DIR}/clang-primary/bin/ld.lld" --version || true
 
@@ -113,10 +107,8 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/02-kernel-clone.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
           cd kernel
-          
           git log --oneline -1
           git submodule status || true
           test -d arch/arm64/configs/vendor
@@ -128,17 +120,14 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/03-defconfig-resolve.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           case "${{ github.event.inputs.region }}" in
             eur) DEFCONFIG="a52sxq_eur_open_defconfig" ;;
             chn) DEFCONFIG="a52sxq_chn_tw_defconfig" ;;
             kor) DEFCONFIG="a52sxq_kor_single_defconfig" ;;
             *) echo "::error::Unsupported region"; exit 1 ;;
           esac
-          
           DEFCONFIG_PATH="kernel/arch/arm64/configs/vendor/${DEFCONFIG}"
           test -f "${DEFCONFIG_PATH}"
-          
           echo "defconfig=${DEFCONFIG}" >> "${GITHUB_OUTPUT}"
           echo "defconfig_path=${DEFCONFIG_PATH}" >> "${GITHUB_OUTPUT}"
           echo "out_dir=${GITHUB_WORKSPACE}/out" >> "${GITHUB_OUTPUT}"
@@ -149,21 +138,15 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/04-sukisu-integrate.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           cd kernel
           rm -rf KernelSU drivers/kernelsu
-          
           git config --global advice.detachedHead false
           git clone --depth=1 -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
-          
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
-          
           sed -i '/kernelsu\//d' drivers/Makefile
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
-          
           sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-          
           echo "::group::SukiSU HEAD"
           git -C KernelSU rev-parse --abbrev-ref HEAD || true
           git -C KernelSU rev-parse --short HEAD
@@ -176,14 +159,12 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/04b-sukisu-compat.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           cd kernel
+
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
-          
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
           done
-          
           for f in KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig; do
             [ -f "$f" ] && sed -i '/kpm\/Kconfig/d' "$f" || true
           done
@@ -206,11 +187,12 @@ jobs:
               done || true
 
           mkdir -p include/linux/log
-          printf '%s\n' \
-            '#ifndef _LINUX_PERFLOG_H' \
-            '#define _LINUX_PERFLOG_H' \
-            'static inline void perf_log_printk(const char *fmt, ...) {}' \
-            '#endif' > include/linux/log/perflog.h
+          cat > include/linux/log/perflog.h <<'EOF'
+          #ifndef _LINUX_PERFLOG_H
+          #define _LINUX_PERFLOG_H
+          static inline void perf_log_printk(const char *fmt, ...) {}
+          #endif
+          EOF
 
           grep -RIl --include='*.c' --include='*.h' 'perflog.h' kernel drivers fs KernelSU drivers/kernelsu 2>/dev/null \
             | while read -r f; do
@@ -220,8 +202,7 @@ jobs:
           while read -r f; do
             [ -f "$f" ] || continue
             grep -q '<asm/seccomp.h>' "$f" || sed -i '/#include <linux\/seccomp.h>/a #include <asm/seccomp.h>' "$f"
-            if ! grep -q 'KSU_SECCOMP_ARCH_FALLBACK' "$f"; then
-              python3 - "$f" <<'EOF_PYTHON'
+            python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
           p = Path(sys.argv[1])
@@ -231,8 +212,7 @@ jobs:
           if needle in s and 'KSU_SECCOMP_ARCH_FALLBACK' not in s:
               s = s.replace(needle, insert, 1)
               p.write_text(s)
-          EOF_PYTHON
-            fi
+          PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/seccomp_cache.c' -type f 2>/dev/null)
 
           while read -r f; do
@@ -245,7 +225,7 @@ jobs:
 
           while read -r f; do
             [ -f "$f" ] || continue
-            cat > "$f" <<'EOF_C'
+            cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           #include <linux/version.h>
           #include <linux/fsnotify_backend.h>
@@ -327,7 +307,7 @@ jobs:
           		return ret;
           	}
           	pr_info("watching %s\n", wd->path);
-          	return 0;
+          	return ret;
           }
 
           static void unwatch_one_dir(struct watch_dir *wd)
@@ -369,8 +349,15 @@ jobs:
           	fsnotify_put_group(g);
           	pr_info("observer exit done\n");
           }
-          EOF_C
+          EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
+
+          while read -r f; do
+            [ -f "$f" ] || continue
+            grep -q '<linux/task_work.h>' "$f" || sed -i '/#include <linux\/workqueue.h>/a #include <linux/task_work.h>' "$f" || true
+            grep -q '<linux/sched/task.h>' "$f" || sed -i '/#include <linux\/sched.h>/a #include <linux/sched/task.h>' "$f" || true
+            sed -i 's/task_work_add(tsk, cb, TWA_RESUME)/task_work_add(tsk, cb, true)/g' "$f"
+          done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
 
           echo ">> compat result"
           grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
@@ -383,14 +370,11 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           cd kernel
           rm -rf ../susfs4ksu
           git clone --depth=1 -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
-          
           cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           cp -fv ../susfs4ksu/kernel_patches/fs/* fs/
-          
           SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
           test -n "${SUSFS_KERNEL_PATCH}"
 
@@ -398,27 +382,33 @@ jobs:
             local rej="fs/proc/fd.c.rej"
             local target="fs/proc/fd.c"
             [ -f "$rej" ] || return 0
-            
             echo "::warning::Auto-fixing SUSFS reject in ${target}"
             echo "::group::fd.c reject"
             cat "$rej" || true
             echo "::endgroup::"
-            
             if ! grep -q 'susfs_fd_link' "$target"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
-                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ s/path_get(path);/path_get(path);\n\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\n#endif/' "$target"
+                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+          #endif
+                }' "$target"
               elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "$target"; then
-                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ s/path_get(path);/path_get(path);\n\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\n#endif/' "$target"
+                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+          #endif
+                }' "$target"
               else
                 echo "::error::Could not locate proc_fd_link signature in ${target}"
                 return 1
               fi
             fi
-            
             if ! grep -q '#include <linux/susfs.h>' "$target"; then
               sed -i '/^#include <linux\/fs.h>/a #include <linux/susfs.h>' "$target" || sed -i '1i #include <linux/susfs.h>' "$target"
             fi
-            
             rm -f "$rej"
             return 0
           }
@@ -450,23 +440,18 @@ jobs:
             patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
             PATCH_RC=${PIPESTATUS[0]}
             set -e
-            
             auto_fix_fd_proc_reject || {
               echo "::error::Auto-fix for fs/proc/fd.c reject failed"
               exit 1
             }
-            
             drop_optional_susfs_rejects
-            
             REJ_LIST="$(find . -type f -name '*.rej' | tr '\n' ' ')"
             REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
-            
             if [ "$REJ_COUNT" != "0" ]; then
               echo "::error::SUSFS kernel patch left ${REJ_COUNT} reject file(s): ${REJ_LIST}"
               find . -type f -name '*.rej' -print
               exit 1
             fi
-            
             if [ "$PATCH_RC" != "0" ]; then
               echo "::warning::patch exited with code ${PATCH_RC} but no .rej remains; continuing"
             fi
@@ -475,7 +460,6 @@ jobs:
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
           test -f include/linux/susfs.h || { echo "::error::include/linux/susfs.h missing"; exit 1; }
           test -f fs/susfs.c || { echo "::error::fs/susfs.c missing"; exit 1; }
-          
           echo "::group::SUSFS inventory"
           ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c
           echo "::endgroup::"
@@ -540,8 +524,8 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/07-build-driver.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           cd kernel
+
           mkdir -p "$CCACHE_DIR"
           ccache -M 8G || true
           ccache -z || true
@@ -612,20 +596,18 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/10-pack.log"
           exec > >(tee -a "${LOG}") 2>&1
-          
           git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel3
 
           sed -i \
             -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|" \
             -e 's|^device.name1=.*|device.name1=a52sxq|' \
-            -e 's|^is_slot_device=.*|is_slot_device=0;|' \
-            -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|' \
+            -e 's|^is_slot_device=.*|is_slot_device=0|' \
+            -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0|' \
             AnyKernel3/anykernel.sh
 
           grep -q '^device.name2=' AnyKernel3/anykernel.sh \
             && sed -i 's|^device.name2=.*|device.name2=a52sxqzt|' AnyKernel3/anykernel.sh \
             || sed -i '/^device.name1=.*/a device.name2=a52sxqzt' AnyKernel3/anykernel.sh
-            
           grep -q '^device.name3=' AnyKernel3/anykernel.sh \
             && sed -i 's|^device.name3=.*|device.name3=a52sxqks|' AnyKernel3/anykernel.sh \
             || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
@@ -679,11 +661,11 @@ jobs:
           {
             echo "## SM7325 A52s SukiSU/SUSFS build summary"
             echo
-            echo "- kernel_branch: \`${{ github.event.inputs.kernel_branch }}\`"
-            echo "- region: \`${{ github.event.inputs.region }}\`"
-            echo "- sukisu_ref: \`${{ env.SUKISU_REF }}\`"
-            echo "- defconfig: \`${{ steps.cfg.outputs.defconfig || 'unresolved' }}\`"
-            echo "- toolchain: \`${{ steps.build.outputs.toolchain || 'failed-before-build' }}\`"
+            echo "- kernel_branch: `${{ github.event.inputs.kernel_branch }}`"
+            echo "- region: `${{ github.event.inputs.region }}`"
+            echo "- sukisu_ref: `${{ env.SUKISU_REF }}`"
+            echo "- defconfig: `${{ steps.cfg.outputs.defconfig || 'unresolved' }}`"
+            echo "- toolchain: `${{ steps.build.outputs.toolchain || 'failed-before-build' }}`"
             echo
             echo "### Tail of all logs"
             echo '```text'
