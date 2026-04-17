@@ -27,7 +27,7 @@ on:
         default: false
 
 concurrency:
-  group: sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}
+  group: "sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}"
   cancel-in-progress: false
 
 jobs:
@@ -37,20 +37,20 @@ jobs:
     permissions:
       contents: read
     env:
-      TZ: Asia/Bangkok
-      ARCH: arm64
+      TZ: "Asia/Bangkok"
+      ARCH: "arm64"
       LLVM: "1"
       LLVM_IAS: "1"
-      ANDROID_MAJOR_VERSION: u
+      ANDROID_MAJOR_VERSION: "u"
       PLATFORM_VERSION: "16"
-      TARGET_BUILD_VARIANT: user
-      KERNEL_REPO: https://github.com/JingMatrix/samsung_sm7325
-      ANYKERNEL_REPO: https://github.com/SM7325-AE/AnyKernel3
-      SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
-      SUKISU_REF: main
-      SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
-      SUSFS_REF: kernel-5.4
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      TARGET_BUILD_VARIANT: "user"
+      KERNEL_REPO: "https://github.com/JingMatrix/samsung_sm7325"
+      ANYKERNEL_REPO: "https://github.com/SM7325-AE/AnyKernel3"
+      SUKISU_REPO: "https://github.com/SukiSU-Ultra/SukiSU-Ultra"
+      SUKISU_REF: "main"
+      SUSFS_REPO: "https://gitlab.com/simonpunk/susfs4ksu.git"
+      SUSFS_REF: "kernel-5.4"
+      CCACHE_DIR: "${{ github.workspace }}/.ccache"
 
     steps:
       - name: Checkout workflow repository
@@ -62,6 +62,7 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/00-free-space.log"
           exec > >(tee -a "${LOG}") 2>&1
+          
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
           docker system prune -af || true
           df -h
@@ -72,6 +73,7 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/01-deps.log"
           exec > >(tee -a "${LOG}") 2>&1
+          
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential ccache cpio curl device-tree-compiler file flex gawk git jq \
@@ -79,6 +81,7 @@ jobs:
             pahole patch python3 rsync unzip xz-utils zip zstd \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+            
           clang --version || true
           clang-14 --version || true
 
@@ -86,7 +89,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-noheredoc-v1
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-clean-v1
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -98,8 +101,10 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/02-kernel-clone.log"
           exec > >(tee -a "${LOG}") 2>&1
+          
           git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
           cd kernel
+          
           git log --oneline -1
           git submodule status || true
           test -d arch/arm64/configs/vendor
@@ -111,14 +116,17 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/03-defconfig-resolve.log"
           exec > >(tee -a "${LOG}") 2>&1
+          
           case "${{ github.event.inputs.region }}" in
             eur) DEFCONFIG="a52sxq_eur_open_defconfig" ;;
             chn) DEFCONFIG="a52sxq_chn_tw_defconfig" ;;
             kor) DEFCONFIG="a52sxq_kor_single_defconfig" ;;
             *) echo "::error::Unsupported region"; exit 1 ;;
           esac
+          
           DEFCONFIG_PATH="kernel/arch/arm64/configs/vendor/${DEFCONFIG}"
           test -f "${DEFCONFIG_PATH}"
+          
           echo "defconfig=${DEFCONFIG}" >> "${GITHUB_OUTPUT}"
           echo "defconfig_path=${DEFCONFIG_PATH}" >> "${GITHUB_OUTPUT}"
           echo "out_dir=${GITHUB_WORKSPACE}/out" >> "${GITHUB_OUTPUT}"
@@ -129,20 +137,71 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/04-sukisu-integrate.log"
           exec > >(tee -a "${LOG}") 2>&1
+          
           cd kernel
           rm -rf KernelSU drivers/kernelsu
           git config --global advice.detachedHead false
           git clone --depth=1 -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
+          
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
           sed -i '/kernelsu\//d' drivers/Makefile
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          
           sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          
           echo "::group::SukiSU HEAD"
           git -C KernelSU rev-parse --abbrev-ref HEAD || true
           git -C KernelSU rev-parse --short HEAD
           git -C KernelSU log --oneline -1
           echo "::endgroup::"
+
+      - name: Apply non-interactive SukiSU compatibility patches
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/04b-sukisu-compat.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          
+          cd kernel
+          rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
+          
+          for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
+            [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
+          done
+          
+          for f in KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig; do
+            [ -f "$f" ] && sed -i '/kpm\/Kconfig/d' "$f" || true
+          done
+
+          grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null \
+            | while read -r f; do
+                sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
+              done || true
+
+          grep -RIlE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' KernelSU drivers/kernelsu 2>/dev/null \
+            | while read -r f; do
+                sed -i \
+                  -e 's/strncpy_from_user_nofault/strncpy_from_user/g' \
+                  -e 's/copy_from_user_nofault/copy_from_user/g' \
+                  -e 's/copy_to_user_nofault/copy_to_user/g' \
+                  -e 's/copy_from_kernel_nofault/probe_kernel_read/g' \
+                  -e 's/copy_to_kernel_nofault/probe_kernel_write/g' \
+                  "$f"
+                grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
+              done || true
+
+          mkdir -p include/linux/log
+          printf '%s\n' \
+            '#ifndef _LINUX_PERFLOG_H' \
+            '#define _LINUX_PERFLOG_H' \
+            'static inline void perf_log_printk(const char *fmt, ...) {}' \
+            '#endif' > include/linux/log/perflog.h
+
+          grep -RIl --include='*.c' --include='*.h' 'perflog.h' kernel drivers fs KernelSU drivers/kernelsu 2>/dev/null \
+            | while read -r f; do
+                sed -i 's|<log/perflog.h>|<linux/log/perflog.h>|g' "$f"
+              done || true
 
       - name: Materialize SUSFS kernel-side patchset
         shell: bash
@@ -150,11 +209,13 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
           exec > >(tee -a "${LOG}") 2>&1
+          
           cd kernel
           rm -rf ../susfs4ksu
           git clone --depth=1 -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
           cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           cp -fv ../susfs4ksu/kernel_patches/fs/* fs/
+          
           SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
           test -n "${SUSFS_KERNEL_PATCH}"
 
@@ -162,56 +223,66 @@ jobs:
             local rej="fs/proc/fd.c.rej"
             local target="fs/proc/fd.c"
             [ -f "${rej}" ] || return 0
+            
             echo "::warning::Auto-fixing SUSFS reject in ${target}"
             echo "::group::fd.c reject"
             cat "${rej}" || true
             echo "::endgroup::"
+            
             if ! grep -q 'susfs_fd_link' "${target}"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "${target}"; then
+                # STRICT WARNING: Do not alter indentation inside this sed block.
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
-                \
-                #ifdef CONFIG_KSU_SUSFS\
-                \	susfs_fd_link(path, &inode, &mnt, &dentry);\
-                #endif
+\
+#ifdef CONFIG_KSU_SUSFS\
+\	susfs_fd_link(path, &inode, &mnt, &dentry);\
+#endif
                 }' "${target}"
               elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "${target}"; then
+                # STRICT WARNING: Do not alter indentation inside this sed block.
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
-                \
-                #ifdef CONFIG_KSU_SUSFS\
-                \	susfs_fd_link(path, &inode, &mnt, &dentry);\
-                #endif
+\
+#ifdef CONFIG_KSU_SUSFS\
+\	susfs_fd_link(path, &inode, &mnt, &dentry);\
+#endif
                 }' "${target}"
               else
                 echo "::error::Could not locate proc_fd_link signature in ${target}"
                 return 1
               fi
             fi
+            
             if ! grep -q '#include <linux/susfs.h>' "${target}"; then
-              sed -i '/^#include <linux\/fs.h>/a #include <linux/susfs.h>' "${target}" || sed -i '1i #include <linux/susfs.h>' "${target}"
+              sed -i '/^#include <linux\/fs.h>/a #include <linux/susfs.h>' "$target" || sed -i '1i #include <linux/susfs.h>' "$target"
             fi
-            rm -f "${rej}"
+            
+            rm -f "$rej"
             return 0
           }
 
-          if git apply --check --unsafe-paths "${SUSFS_KERNEL_PATCH}" >/dev/null 2>&1; then
-            git apply --unsafe-paths "${SUSFS_KERNEL_PATCH}"
+          if git apply --check --unsafe-paths "$SUSFS_KERNEL_PATCH" >/dev/null 2>&1; then
+            git apply --unsafe-paths "$SUSFS_KERNEL_PATCH"
           else
             set +e
-            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=3 < "${SUSFS_KERNEL_PATCH}" 2>&1 | tee -a "${LOG}"
+            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=3 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
             PATCH_RC=${PIPESTATUS[0]}
             set -e
+            
             auto_fix_fd_proc_reject || {
               echo "::error::Auto-fix for fs/proc/fd.c reject failed"
               exit 1
             }
+            
             REJ_LIST="$(find . -type f -name '*.rej' | tr '\n' ' ')"
             REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
-            if [ "${REJ_COUNT}" != "0" ]; then
+            
+            if [ "$REJ_COUNT" != "0" ]; then
               echo "::error::SUSFS kernel patch left ${REJ_COUNT} reject file(s): ${REJ_LIST}"
               find . -type f -name '*.rej' -print
               exit 1
             fi
-            if [ "${PATCH_RC}" != "0" ]; then
+            
+            if [ "$PATCH_RC" != "0" ]; then
               echo "::warning::patch exited with code ${PATCH_RC} but no .rej remains; continuing"
             fi
           fi
@@ -219,6 +290,7 @@ jobs:
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
           test -f include/linux/susfs.h || { echo "::error::include/linux/susfs.h missing"; exit 1; }
           test -f fs/susfs.c || { echo "::error::fs/susfs.c missing"; exit 1; }
+          
           echo "::group::SUSFS inventory"
           ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c
           echo "::endgroup::"
@@ -230,21 +302,25 @@ jobs:
           LOG="${GITHUB_WORKSPACE}/06-defconfig-patch.log"
           exec > >(tee -a "${LOG}") 2>&1
           DEFCONFIG="${{ steps.cfg.outputs.defconfig_path }}"
+
           disable_cfg() {
             local key="$1"
-            sed -i "/^${key}=y$/d;/^${key}=m$/d;/^# ${key} is not set$/d" "${DEFCONFIG}"
-            printf '# %s is not set\n' "${key}" >> "${DEFCONFIG}"
+            sed -i "/^${key}=y$/d;/^${key}=m$/d;/^# ${key} is not set$/d" "$DEFCONFIG"
+            printf '# %s is not set\n' "$key" >> "$DEFCONFIG"
           }
+
           enable_cfg() {
             local key="$1"
-            sed -i "/^${key}=y$/d;/^${key}=m$/d;/^# ${key} is not set$/d" "${DEFCONFIG}"
-            printf '%s=y\n' "${key}" >> "${DEFCONFIG}"
+            sed -i "/^${key}=y$/d;/^${key}=m$/d;/^# ${key} is not set$/d" "$DEFCONFIG"
+            printf '%s=y\n' "$key" >> "$DEFCONFIG"
           }
+
           enable_cfg CONFIG_KSU
           enable_cfg CONFIG_KSU_MANUAL_HOOK
           enable_cfg CONFIG_KSU_SUSFS
           disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
           disable_cfg CONFIG_KSU_NONE_HOOK
+
           for key in \
             CONFIG_SECURITY_DEFEX \
             CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
@@ -264,10 +340,11 @@ jobs:
             CONFIG_SEC_RESTRICT_SETUID \
             CONFIG_SEC_RESTRICT_ROOTING
           do
-            disable_cfg "${key}"
+            disable_cfg "$key"
           done
+
           echo "::group::Defconfig flags"
-          grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "${DEFCONFIG}" || true
+          grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
           echo "::endgroup::"
 
       - name: Build kernel
@@ -277,10 +354,12 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/07-build-driver.log"
           exec > >(tee -a "${LOG}") 2>&1
+          
           cd kernel
-          mkdir -p "${CCACHE_DIR}"
+          mkdir -p "$CCACHE_DIR"
           ccache -M 8G || true
           ccache -z || true
+          
           export KBUILD_BUILD_USER="github-actions"
           export KBUILD_BUILD_HOST="ubuntu-24.04"
           export LOCALVERSION="-${{ github.event.inputs.kernel_name }}-$(date +%Y%m%d-%H%M)"
@@ -292,30 +371,34 @@ jobs:
             local cc_bin="$2"
             local ld_bin="$3"
             local out_dir="${{ steps.cfg.outputs.out_dir }}"
-            rm -rf "${out_dir}"
-            mkdir -p "${out_dir}"
-            stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" \
-              ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
-              CC="${cc_bin}" LD="${ld_bin}" \
+            
+            rm -rf "$out_dir"
+            mkdir -p "$out_dir"
+            
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" \
+              ARCH="$ARCH" LLVM="$LLVM" LLVM_IAS="$LLVM_IAS" \
+              CC="$cc_bin" LD="$ld_bin" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
-              CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
+              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
-            stdbuf -oL -eL make -C "${PWD}" O="${out_dir}" -j"$(nproc --all)" \
-              ARCH="${ARCH}" LLVM="${LLVM}" LLVM_IAS="${LLVM_IAS}" \
-              CC="${cc_bin}" LD="${ld_bin}" \
+              
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
+              ARCH="$ARCH" LLVM="$LLVM" LLVM_IAS="$LLVM_IAS" \
+              CC="$cc_bin" LD="$ld_bin" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
-              CROSS_COMPILE="${CROSS_COMPILE}" CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32}" \
+              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
           if build_once "llvm18" "ccache clang" "ld.lld"; then
-            echo "toolchain=llvm18" >> "${GITHUB_OUTPUT}"
+            echo "toolchain=llvm18" >> "$GITHUB_OUTPUT"
           elif build_once "llvm14" "ccache clang-14" "ld.lld-14"; then
-            echo "toolchain=llvm14" >> "${GITHUB_OUTPUT}"
+            echo "toolchain=llvm14" >> "$GITHUB_OUTPUT"
           else
             echo "::error::All toolchain attempts failed"
             exit 1
           fi
+
           test -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image"
           file "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" || true
           ccache -s || true
@@ -328,36 +411,42 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/10-pack.log"
           exec > >(tee -a "${LOG}") 2>&1
-          git clone --depth=1 "${ANYKERNEL_REPO}" AnyKernel3
+          
+          git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel3
           sed -i \
             -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|" \
             -e 's|^device.name1=.*|device.name1=a52sxq|' \
             AnyKernel3/anykernel.sh
+            
           grep -q '^device.name2=' AnyKernel3/anykernel.sh \
             && sed -i 's|^device.name2=.*|device.name2=a52sxqzt|' AnyKernel3/anykernel.sh \
             || sed -i '/^device.name1=.*/a device.name2=a52sxqzt' AnyKernel3/anykernel.sh
+            
           grep -q '^device.name3=' AnyKernel3/anykernel.sh \
             && sed -i 's|^device.name3=.*|device.name3=a52sxqks|' AnyKernel3/anykernel.sh \
             || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
+            
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
           if [ -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" ]; then
             cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" AnyKernel3/dtbo.img
           fi
+          
           DTB_FILE="$(find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -type f -name 'yupik*.dtb' | sort | head -n1)"
-          if [ -z "${DTB_FILE}" ]; then
+          if [ -z "$DTB_FILE" ]; then
             DTB_FILE="$(find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -type f -name '*.dtb' | sort | head -n1)"
           fi
-          [ -n "${DTB_FILE}" ] && cp "${DTB_FILE}" AnyKernel3/dtb || true
+          [ -n "$DTB_FILE" ] && cp "$DTB_FILE" AnyKernel3/dtb || true
+          
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
-            zip -r9 "../${ZIP_NAME}" . \
+            zip -r9 "../$ZIP_NAME" . \
               -x '.git/*' \
                  '.github/*' \
                  'README.md' \
                  '*.gitignore'
           )
-          echo "zip_name=${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Print core errors to console
         if: ${{ failure() }}
@@ -391,7 +480,7 @@ jobs:
             echo '```text'
             tail -n 80 ./*.log 2>/dev/null || true
             echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Pack debug bundle
         if: always()
