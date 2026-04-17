@@ -270,7 +270,6 @@ jobs:
           }
 
           drop_optional_susfs_rejects() {
-            local dropped=0
             for rej in \
               fs/exec.c.rej \
               fs/devpts/inode.c.rej \
@@ -285,7 +284,6 @@ jobs:
                 cat "$rej" || true
                 echo "::endgroup::"
                 rm -f "$rej"
-                dropped=1
               fi
             done
             return 0
@@ -420,7 +418,8 @@ jobs:
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" \
               ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
               CC="$cc_bin" LD="$ld_bin" \
-              HOSTCC="$hostcc_bin" HOSTCXX="g++" HOSTAR="ar" HOSTLD="ld.bfd" \
+              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
+              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
@@ -428,15 +427,16 @@ jobs:
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
               ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
               CC="$cc_bin" LD="$ld_bin" \
-              HOSTCC="$hostcc_bin" HOSTCXX="g++" HOSTAR="ar" HOSTLD="ld.bfd" \
+              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
+              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
-          if build_once "proton-llvm" "ccache clang" "ld.lld" "1" "1" "gcc"; then
+          if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
             echo "toolchain=proton-llvm" >> "$GITHUB_OUTPUT"
-          elif build_once "proton-gas" "ccache clang" "ld.lld" "1" "0" "gcc"; then
+          elif build_once "proton-gas" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1" "0" "gcc -fuse-ld=bfd -B/usr/bin"; then
             echo "toolchain=proton-gas" >> "$GITHUB_OUTPUT"
           else
             echo "::error::All toolchain attempts failed"
