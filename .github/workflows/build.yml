@@ -90,6 +90,7 @@ jobs:
           
           mkdir -p "${TC_DIR}"
           git clone --depth=1 "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
+          
           echo "${TC_DIR}/clang-primary/bin" >> "${GITHUB_PATH}"
           clang --version
 
@@ -112,6 +113,7 @@ jobs:
           
           git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
           cd kernel
+          
           git log --oneline -1
           git submodule status || true
           test -d arch/arm64/configs/vendor
@@ -147,6 +149,7 @@ jobs:
           
           cd kernel
           rm -rf KernelSU drivers/kernelsu
+          
           git config --global advice.detachedHead false
           git clone --depth=1 -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
           
@@ -171,6 +174,7 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           
           cd kernel
+          
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
           
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
@@ -388,6 +392,10 @@ jobs:
           ccache -z || true
 
           export PATH="${TC_DIR}/clang-primary/bin:${PATH}"
+          export HOSTCC="gcc"
+          export HOSTCXX="g++"
+          export HOSTLD="ld.bfd"
+          export HOSTAR="ar"
           export KBUILD_BUILD_USER="github-actions"
           export KBUILD_BUILD_HOST="ubuntu-24.04"
           export LOCALVERSION="-${{ github.event.inputs.kernel_name }}-$(date +%Y%m%d-%H%M)"
@@ -408,6 +416,7 @@ jobs:
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" \
               ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
               CC="$cc_bin" LD="$ld_bin" \
+              HOSTCC="$HOSTCC" HOSTCXX="$HOSTCXX" HOSTLD="$HOSTLD" HOSTAR="$HOSTAR" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
@@ -415,6 +424,7 @@ jobs:
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
               ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
               CC="$cc_bin" LD="$ld_bin" \
+              HOSTCC="$HOSTCC" HOSTCXX="$HOSTCXX" HOSTLD="$HOSTLD" HOSTAR="$HOSTAR" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
