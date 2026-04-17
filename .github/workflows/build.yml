@@ -20,6 +20,14 @@ on:
         description: "Kernel display name"
         required: true
         default: "A52s-SukiSU-Ultra-SUSFS"
+      security_mode:
+        description: "Samsung Security Stripping Mode"
+        required: true
+        type: choice
+        default: "minimal"
+        options:
+          - minimal
+          - aggressive
       upload_patched_source:
         description: "Upload patched source tarball"
         required: true
@@ -45,7 +53,7 @@ jobs:
       KERNEL_REPO: https://github.com/JingMatrix/samsung_sm7325
       ANYKERNEL_REPO: https://github.com/SM7325-AE/AnyKernel3
       SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
-      SUKISU_REF: main
+      SUKISU_REF: 911b075
       SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
       SUSFS_REF: kernel-5.4
       PROTON_CLANG_REPO: https://github.com/kdrag0n/proton-clang.git
@@ -141,7 +149,10 @@ jobs:
           cd kernel
           rm -rf KernelSU drivers/kernelsu
           git config --global advice.detachedHead false
-          git clone --depth=1 -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
+          # Clone using pinned REF for stability
+          git clone --depth=1 -b main "${SUKISU_REPO}" KernelSU
+          cd KernelSU && git fetch origin "${SUKISU_REF}" && git checkout "${SUKISU_REF}" && cd ..
+          
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
           sed -i '/kernelsu\//d' drivers/Makefile
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
@@ -352,14 +363,40 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
+          # STUB CỨNG ALLOWLIST.C
           while read -r f; do
             [ -f "$f" ] || continue
-            # Bruteforce chèn header lên thẳng dòng 1
-            grep -q '<linux/task_work.h>' "$f" || sed -i '1i #include <linux/task_work.h>' "$f"
-            grep -q '<linux/sched/task.h>' "$f" || sed -i '1i #include <linux/sched/task.h>' "$f"
-            # Càn quét và thay thế mọi TWA_RESUME thành true
-            sed -i 's/\bTWA_RESUME\b/true/g' "$f"
+            python3 - "$f" <<'PY'
+          import re
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          if '#include <linux/task_work.h>' not in s: s = '#include <linux/task_work.h>\n' + s
+          if '#include <linux/sched/task.h>' not in s: s = '#include <linux/sched/task.h>\n' + s
+          if '#ifndef TWA_RESUME' not in s: s = '#ifndef TWA_RESUME\n#define TWA_RESUME true\n#endif\n' + s
+          s = re.sub(r'task_work_add\s*\(([^,]+),\s*([^,]+),\s*TWA_RESUME\)', r'task_work_add(\1, \2, true)', s)
+          p.write_text(s)
+          PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
+
+          # STUB CỨNG APP_PROFILE.C
+          while read -r f; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY'
+          import re
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          if '#include <linux/seccomp.h>' not in s: s = '#include <linux/seccomp.h>\n' + s
+          if '#include <linux/sched/task.h>' not in s: s = '#include <linux/sched/task.h>\n' + s
+          s = re.sub(r'atomic_set\(&current->seccomp\.filter_count,\s*0\);', '/* stubbed current filter_count */', s)
+          s = re.sub(r'atomic_set\(&tsk->seccomp\.filter_count,\s*0\);', '/* stubbed tsk filter_count */', s)
+          s = re.sub(r'seccomp_filter_release\([^)]+\);', '/* stubbed seccomp_filter_release */', s)
+          p.write_text(s)
+          PY
+          done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
           echo ">> compat result"
           grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
@@ -489,31 +526,41 @@ jobs:
           enable_cfg CONFIG_KSU
           enable_cfg CONFIG_KSU_MANUAL_HOOK
           enable_cfg CONFIG_KSU_SUSFS
+          
+          # Luôn tắt các debug/trace của KSU
           disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
           disable_cfg CONFIG_KSU_NONE_HOOK
           disable_cfg CONFIG_KSU_DEBUG
+          
+          # Luôn tắt 2 cờ cốt lõi chặn Boot/Root
+          disable_cfg CONFIG_KNOX
+          disable_cfg CONFIG_KNOX_GUARD
+          disable_cfg CONFIG_SEC_RESTRICT_SETUID
+          disable_cfg CONFIG_SEC_RESTRICT_ROOTING
 
-          for key in \
-            CONFIG_SECURITY_DEFEX \
-            CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
-            CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
-            CONFIG_SECURITY_PROCA \
-            CONFIG_PROCA \
-            CONFIG_RKP \
-            CONFIG_RKP_CFP \
-            CONFIG_RKP_NS_PROT \
-            CONFIG_RKP_KDP \
-            CONFIG_TIMA \
-            CONFIG_TIMA_RKP \
-            CONFIG_TIMA_SECBOOT \
-            CONFIG_TIMA_LKMAUTH \
-            CONFIG_KNOX \
-            CONFIG_KNOX_GUARD \
-            CONFIG_SEC_RESTRICT_SETUID \
-            CONFIG_SEC_RESTRICT_ROOTING
-          do
-            disable_cfg "$key"
-          done
+          # Phân tách Mode Tác Chiến
+          if [ "${{ github.event.inputs.security_mode }}" == "aggressive" ]; then
+            echo "::warning::Kích hoạt Aggressive Mode: Stripping toàn bộ bảo mật Samsung!"
+            for key in \
+              CONFIG_SECURITY_DEFEX \
+              CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
+              CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
+              CONFIG_SECURITY_PROCA \
+              CONFIG_PROCA \
+              CONFIG_RKP \
+              CONFIG_RKP_CFP \
+              CONFIG_RKP_NS_PROT \
+              CONFIG_RKP_KDP \
+              CONFIG_TIMA \
+              CONFIG_TIMA_RKP \
+              CONFIG_TIMA_SECBOOT \
+              CONFIG_TIMA_LKMAUTH
+            do
+              disable_cfg "$key"
+            done
+          else
+            echo "::notice::Kích hoạt Minimal Boot-Safe Mode: Giữ lại DEFEX/PROCA/RKP/TIMA để ưu tiên Boot."
+          fi
 
           echo "::group::Defconfig flags"
           grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
@@ -532,7 +579,7 @@ jobs:
           ccache -M 8G || true
           ccache -z || true
 
-          export PATH="${TC_DIR}/clang-primary/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${TC_DIR}/clang-primary/bin:${PATH}"
           export LLVM_PREFIX="${TC_DIR}/clang-primary/bin/"
           export KBUILD_BUILD_USER="github-actions"
           export KBUILD_BUILD_HOST="ubuntu-24.04"
@@ -647,7 +694,6 @@ jobs:
             echo
             echo "> Lỗi gốc đã được trích xuất tự động. Bạn không cần tải file log về nữa."
             echo
-            echo '```text'
             
             FAIL_LOG=""
             for f in $(ls -1rt *.log 2>/dev/null); do
@@ -657,21 +703,31 @@ jobs:
             done
             
             if [ -n "$FAIL_LOG" ]; then
-              # Trích xuất dòng lỗi kèm context (2 dòng trước, 2 dòng sau) giống mẫu
+              FAIL_FILE=$(grep -oP "(?<=/kernel/).*?\.[ch](?=:)" "$FAIL_LOG" | head -n 1 || echo "Không xác định")
+              API_MISMATCH=$(grep -m 1 -iE 'error: |fatal error: ' "$FAIL_LOG" | sed 's/.*error: //' || echo "Không xác định")
+              
+              echo "### 🔍 CHUẨN ĐOÁN NHANH"
+              echo "- **FILE GÂY CHẾT:** \`$FAIL_FILE\`"
+              echo "- **API MISMATCH NGHI PHẠM:** \`$API_MISMATCH\`"
+              echo
+              echo "---"
+              echo "#### CHI TIẾT LỖI TỪ COMPILER:"
+              echo '```text'
               grep -nEi -B 2 -A 2 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|reject file' "$FAIL_LOG" | tail -n 30
               echo "---------------------------------------------------------"
               echo "[20 DÒNG CUỐI CỦA LOG]:"
               tail -n 20 "$FAIL_LOG"
+              echo '```'
             else
+              echo '```text'
               echo "Không tìm thấy chuỗi lỗi rõ ràng."
               echo "---------------------------------------------------------"
               echo "[20 DÒNG CUỐI CỦA LOG]:"
               tail -n 20 $(ls -1rt *.log 2>/dev/null | tail -n 1) || true
+              echo '```'
             fi
-            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Vẫn in ra Console để tiện xem nhanh
           echo "::group::XEM LỖI TRÊN CONSOLE"
           cat "$GITHUB_STEP_SUMMARY"
           echo "::endgroup::"
@@ -686,6 +742,7 @@ jobs:
             echo
             echo "- **Kernel Branch:** \`${{ github.event.inputs.kernel_branch }}\`"
             echo "- **Region:** \`${{ github.event.inputs.region }}\`"
+            echo "- **Security Mode:** \`${{ github.event.inputs.security_mode }}\`"
             echo "- **SukiSU Ref:** \`${{ env.SUKISU_REF }}\`"
             echo "- **Defconfig:** \`${{ steps.cfg.outputs.defconfig || 'unresolved' }}\`"
             echo "- **Toolchain:** \`${{ steps.build.outputs.toolchain || 'failed-before-build' }}\`"
