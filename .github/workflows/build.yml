@@ -221,7 +221,7 @@ jobs:
             [ -f "$f" ] || continue
             grep -q '<asm/seccomp.h>' "$f" || sed -i '/#include <linux\/seccomp.h>/a #include <asm/seccomp.h>' "$f"
             if ! grep -q 'KSU_SECCOMP_ARCH_FALLBACK' "$f"; then
-              python3 - "$f" <<'PY'
+              python3 - "$f" <<'EOF_PYTHON'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1])
@@ -244,7 +244,7 @@ insert = '''#include "infra/seccomp_cache.h"
 if needle in s and 'KSU_SECCOMP_ARCH_FALLBACK' not in s:
     s = s.replace(needle, insert, 1)
     p.write_text(s)
-PY
+EOF_PYTHON
             fi
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/seccomp_cache.c' -type f 2>/dev/null)
 
