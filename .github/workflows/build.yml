@@ -79,7 +79,9 @@ jobs:
             bc bison build-essential ccache cpio curl device-tree-compiler file flex gawk git jq \
             libelf-dev libssl-dev pahole patch python3 rsync unzip xz-utils zip zstd \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+            gcc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi g++
+            
+          gcc --version || true
 
       - name: Setup Proton Clang
         shell: bash
@@ -90,15 +92,16 @@ jobs:
           
           mkdir -p "${TC_DIR}"
           git clone --depth=1 "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
-          
           echo "${TC_DIR}/clang-primary/bin" >> "${GITHUB_PATH}"
-          clang --version
+          
+          "${TC_DIR}/clang-primary/bin/clang" --version
+          "${TC_DIR}/clang-primary/bin/ld.lld" --version || true
 
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-proton-v1
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-proton-hostfix-v1
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -174,9 +177,8 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           
           cd kernel
-          
+
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
-          
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
           done
@@ -351,6 +353,7 @@ jobs:
           enable_cfg CONFIG_KSU_SUSFS
           disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
           disable_cfg CONFIG_KSU_NONE_HOOK
+          disable_cfg CONFIG_KSU_DEBUG
 
           for key in \
             CONFIG_SECURITY_DEFEX \
@@ -408,6 +411,7 @@ jobs:
             local ld_bin="$3"
             local llvm_flag="$4"
             local ias_flag="$5"
+            local hostcc_bin="$6"
             local out_dir="${{ steps.cfg.outputs.out_dir }}"
 
             rm -rf "$out_dir"
@@ -416,7 +420,7 @@ jobs:
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" \
               ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
               CC="$cc_bin" LD="$ld_bin" \
-              HOSTCC="$HOSTCC" HOSTCXX="$HOSTCXX" HOSTLD="$HOSTLD" HOSTAR="$HOSTAR" \
+              HOSTCC="$hostcc_bin" HOSTCXX="g++" HOSTAR="ar" HOSTLD="ld.bfd" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
@@ -424,15 +428,15 @@ jobs:
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
               ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
               CC="$cc_bin" LD="$ld_bin" \
-              HOSTCC="$HOSTCC" HOSTCXX="$HOSTCXX" HOSTLD="$HOSTLD" HOSTAR="$HOSTAR" \
+              HOSTCC="$hostcc_bin" HOSTCXX="g++" HOSTAR="ar" HOSTLD="ld.bfd" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
-          if build_once "proton-llvm" "ccache clang" "ld.lld" "1" "1"; then
+          if build_once "proton-llvm" "ccache clang" "ld.lld" "1" "1" "gcc"; then
             echo "toolchain=proton-llvm" >> "$GITHUB_OUTPUT"
-          elif build_once "proton-gas" "ccache clang" "ld.lld" "1" "0"; then
+          elif build_once "proton-gas" "ccache clang" "ld.lld" "1" "0" "gcc"; then
             echo "toolchain=proton-gas" >> "$GITHUB_OUTPUT"
           else
             echo "::error::All toolchain attempts failed"
@@ -453,12 +457,14 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           
           git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel3
-          
+
           sed -i \
             -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|" \
             -e 's|^device.name1=.*|device.name1=a52sxq|' \
+            -e 's|^is_slot_device=.*|is_slot_device=0|' \
+            -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0|' \
             AnyKernel3/anykernel.sh
-            
+
           grep -q '^device.name2=' AnyKernel3/anykernel.sh \
             && sed -i 's|^device.name2=.*|device.name2=a52sxqzt|' AnyKernel3/anykernel.sh \
             || sed -i '/^device.name1=.*/a device.name2=a52sxqzt' AnyKernel3/anykernel.sh
@@ -466,19 +472,19 @@ jobs:
           grep -q '^device.name3=' AnyKernel3/anykernel.sh \
             && sed -i 's|^device.name3=.*|device.name3=a52sxqks|' AnyKernel3/anykernel.sh \
             || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
-            
+
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
-          
+
           if [ -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" ]; then
             cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" AnyKernel3/dtbo.img
           fi
-          
+
           DTB_FILE="$(find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -type f -name 'yupik*.dtb' | sort | head -n1)"
           if [ -z "$DTB_FILE" ]; then
             DTB_FILE="$(find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -type f -name '*.dtb' | sort | head -n1)"
           fi
           [ -n "$DTB_FILE" ] && cp "$DTB_FILE" AnyKernel3/dtb || true
-          
+
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
@@ -490,16 +496,20 @@ jobs:
           )
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Print core errors to console
+      - name: TÓM TẮT LỖI BUILD
         if: ${{ failure() }}
         shell: bash
         run: |
           set +e
-          echo "::group::Core error extractor"
+          echo "::group::TÓM TẮT LỖI BUILD"
           for f in ./*.log; do
             [ -f "$f" ] || continue
             echo "===== $(basename "$f") ====="
-            grep -nEi 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|patching file |Hunk #[0-9]+ .*FAILED|can.t find remote ref|can.t find file to patch|reject file|missing|not found|warning:' "$f" | tail -n 60 || tail -n 100 "$f" || true
+            echo "LỖI CHÍNH:"
+            grep -nEi 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|patching file |Hunk #[0-9]+ .*FAILED|reject file|missing|not found|warning:' "$f" | tail -n 25 || true
+            echo
+            echo "20 DÒNG CUỐI:"
+            tail -n 20 "$f" || true
             echo
           done
           echo "::endgroup::"
