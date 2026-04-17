@@ -233,18 +233,18 @@ jobs:
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "${target}"; then
                 # STRICT WARNING: Do not alter indentation inside this sed block.
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
-\
-#ifdef CONFIG_KSU_SUSFS\
-\	susfs_fd_link(path, &inode, &mnt, &dentry);\
-#endif
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \	susfs_fd_link(path, &inode, &mnt, &dentry);\
+          #endif
                 }' "${target}"
               elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "${target}"; then
                 # STRICT WARNING: Do not alter indentation inside this sed block.
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
-\
-#ifdef CONFIG_KSU_SUSFS\
-\	susfs_fd_link(path, &inode, &mnt, &dentry);\
-#endif
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \	susfs_fd_link(path, &inode, &mnt, &dentry);\
+          #endif
                 }' "${target}"
               else
                 echo "::error::Could not locate proc_fd_link signature in ${target}"
