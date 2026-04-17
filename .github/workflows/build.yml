@@ -93,6 +93,7 @@ jobs:
           mkdir -p "${TC_DIR}"
           git clone --depth=1 "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
           
+          echo "${TC_DIR}/clang-primary/bin" >> "${GITHUB_PATH}"
           "${TC_DIR}/clang-primary/bin/clang" --version
           "${TC_DIR}/clang-primary/bin/ld.lld" --version || true
 
@@ -177,7 +178,6 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           
           cd kernel
-
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
           
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
@@ -398,6 +398,7 @@ jobs:
           ccache -z || true
 
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
+          export LLVM_PREFIX="${TC_DIR}/clang-primary/bin/"
           export KBUILD_BUILD_USER="github-actions"
           export KBUILD_BUILD_HOST="ubuntu-24.04"
           export LOCALVERSION="-${{ github.event.inputs.kernel_name }}-$(date +%Y%m%d-%H%M)"
@@ -421,6 +422,9 @@ jobs:
               CC="$cc_bin" LD="$ld_bin" \
               HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
               HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
+              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
+              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
+              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
@@ -430,14 +434,17 @@ jobs:
               CC="$cc_bin" LD="$ld_bin" \
               HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
               HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
+              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
+              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
+              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
-          if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
+          if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
             echo "toolchain=proton-llvm" >> "$GITHUB_OUTPUT"
-          elif build_once "proton-gas" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1" "0" "gcc -fuse-ld=bfd -B/usr/bin"; then
+          elif build_once "proton-gas" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "0" "gcc -fuse-ld=bfd -B/usr/bin"; then
             echo "toolchain=proton-gas" >> "$GITHUB_OUTPUT"
           else
             echo "::error::All toolchain attempts failed"
