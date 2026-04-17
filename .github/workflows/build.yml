@@ -39,8 +39,6 @@ jobs:
     env:
       TZ: "Asia/Bangkok"
       ARCH: "arm64"
-      LLVM: "1"
-      LLVM_IAS: "1"
       ANDROID_MAJOR_VERSION: "u"
       PLATFORM_VERSION: "16"
       TARGET_BUILD_VARIANT: "user"
@@ -50,7 +48,9 @@ jobs:
       SUKISU_REF: "main"
       SUSFS_REPO: "https://gitlab.com/simonpunk/susfs4ksu.git"
       SUSFS_REF: "kernel-5.4"
+      PROTON_CLANG_REPO: "https://github.com/kdrag0n/proton-clang.git"
       CCACHE_DIR: "${{ github.workspace }}/.ccache"
+      TC_DIR: "${{ github.workspace }}/toolchains"
 
     steps:
       - name: Checkout workflow repository
@@ -77,19 +77,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential ccache cpio curl device-tree-compiler file flex gawk git jq \
-            libelf-dev libssl-dev lld llvm clang clang-14 lld-14 llvm-14 \
-            pahole patch python3 rsync unzip xz-utils zip zstd \
+            libelf-dev libssl-dev pahole patch python3 rsync unzip xz-utils zip zstd \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
-            
-          clang --version || true
-          clang-14 --version || true
+
+      - name: Setup Proton Clang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/01b-toolchain.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          
+          mkdir -p "${TC_DIR}"
+          git clone --depth=1 "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
+          
+          echo "${TC_DIR}/clang-primary/bin" >> "${GITHUB_PATH}"
+          clang --version
 
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-clean-v1
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-proton-v1
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -203,6 +212,13 @@ jobs:
                 sed -i 's|<log/perflog.h>|<linux/log/perflog.h>|g' "$f"
               done || true
 
+          while read -r f; do
+            [ -f "$f" ] || continue
+            sed -i \
+              -e 's/security_inode_init_security_anon(inode, \&qname, context_inode)/security_inode_init_security(inode, context_inode, \&qname, NULL, NULL)/g' \
+              "$f"
+          done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
+
       - name: Materialize SUSFS kernel-side patchset
         shell: bash
         run: |
@@ -213,6 +229,7 @@ jobs:
           cd kernel
           rm -rf ../susfs4ksu
           git clone --depth=1 -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
+          
           cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           cp -fv ../susfs4ksu/kernel_patches/fs/* fs/
           
@@ -231,28 +248,16 @@ jobs:
             
             if ! grep -q 'susfs_fd_link' "${target}"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "${target}"; then
-                # STRICT WARNING: Do not alter indentation inside this sed block.
-                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS\
-          \	susfs_fd_link(path, &inode, &mnt, &dentry);\
-          #endif
-                }' "${target}"
+                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ s/path_get(path);/path_get(path);\n\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\n#endif/' "${target}"
               elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "${target}"; then
-                # STRICT WARNING: Do not alter indentation inside this sed block.
-                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS\
-          \	susfs_fd_link(path, &inode, &mnt, &dentry);\
-          #endif
-                }' "${target}"
+                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ s/path_get(path);/path_get(path);\n\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\n#endif/' "${target}"
               else
                 echo "::error::Could not locate proc_fd_link signature in ${target}"
                 return 1
               fi
             fi
             
-            if ! grep -q '#include <linux/susfs.h>' "${target}"; then
+            if ! grep -q '#include <linux/susfs.h>' "$target"; then
               sed -i '/^#include <linux\/fs.h>/a #include <linux/susfs.h>' "$target" || sed -i '1i #include <linux/susfs.h>' "$target"
             fi
             
@@ -264,7 +269,7 @@ jobs:
             git apply --unsafe-paths "$SUSFS_KERNEL_PATCH"
           else
             set +e
-            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=3 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
+            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
             PATCH_RC=${PIPESTATUS[0]}
             set -e
             
@@ -359,7 +364,8 @@ jobs:
           mkdir -p "$CCACHE_DIR"
           ccache -M 8G || true
           ccache -z || true
-          
+
+          export PATH="${TC_DIR}/clang-primary/bin:${PATH}"
           export KBUILD_BUILD_USER="github-actions"
           export KBUILD_BUILD_HOST="ubuntu-24.04"
           export LOCALVERSION="-${{ github.event.inputs.kernel_name }}-$(date +%Y%m%d-%H%M)"
@@ -370,30 +376,32 @@ jobs:
             local tag="$1"
             local cc_bin="$2"
             local ld_bin="$3"
+            local llvm_flag="$4"
+            local ias_flag="$5"
             local out_dir="${{ steps.cfg.outputs.out_dir }}"
-            
+
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
-            
+
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" \
-              ARCH="$ARCH" LLVM="$LLVM" LLVM_IAS="$LLVM_IAS" \
+              ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
               CC="$cc_bin" LD="$ld_bin" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
-              
+
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
-              ARCH="$ARCH" LLVM="$LLVM" LLVM_IAS="$LLVM_IAS" \
+              ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
               CC="$cc_bin" LD="$ld_bin" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
               2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
-          if build_once "llvm18" "ccache clang" "ld.lld"; then
-            echo "toolchain=llvm18" >> "$GITHUB_OUTPUT"
-          elif build_once "llvm14" "ccache clang-14" "ld.lld-14"; then
-            echo "toolchain=llvm14" >> "$GITHUB_OUTPUT"
+          if build_once "proton-llvm" "ccache clang" "ld.lld" "1" "1"; then
+            echo "toolchain=proton-llvm" >> "$GITHUB_OUTPUT"
+          elif build_once "proton-gas" "ccache clang" "ld.lld" "1" "0"; then
+            echo "toolchain=proton-gas" >> "$GITHUB_OUTPUT"
           else
             echo "::error::All toolchain attempts failed"
             exit 1
@@ -413,9 +421,11 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           
           git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel3
+          
           sed -i \
             -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|" \
             -e 's|^device.name1=.*|device.name1=a52sxq|' \
+            -e 's|^is_slot_device=.*|is_slot_device=0;|' \
             AnyKernel3/anykernel.sh
             
           grep -q '^device.name2=' AnyKernel3/anykernel.sh \
@@ -427,6 +437,7 @@ jobs:
             || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
             
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
+          
           if [ -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" ]; then
             cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" AnyKernel3/dtbo.img
           fi
@@ -457,7 +468,7 @@ jobs:
           for f in ./*.log; do
             [ -f "$f" ] || continue
             echo "===== $(basename "$f") ====="
-            grep -nEi 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|patching file |Hunk #[0-9]+ .*FAILED|can.t find remote ref|can.t find file to patch|reject file|missing|not found|warning:' "$f" | tail -n 40 || tail -n 80 "$f" || true
+            grep -nEi 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|patching file |Hunk #[0-9]+ .*FAILED|can.t find remote ref|can.t find file to patch|reject file|missing|not found|warning:' "$f" | tail -n 60 || tail -n 100 "$f" || true
             echo
           done
           echo "::endgroup::"
