@@ -220,6 +220,7 @@ jobs:
           while read -r f; do
             [ -f "$f" ] || continue
             grep -q '<asm/seccomp.h>' "$f" || sed -i '/#include <linux\/seccomp.h>/a #include <asm/seccomp.h>' "$f"
+            grep -q 'SECCOMP_ARCH_NATIVE_NR' "$f" || true
             if ! grep -q 'KSU_SECCOMP_ARCH_FALLBACK' "$f"; then
               python3 - "$f" <<'EOF_PYTHON'
           from pathlib import Path
