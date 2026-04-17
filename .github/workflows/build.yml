@@ -354,9 +354,11 @@ jobs:
 
           while read -r f; do
             [ -f "$f" ] || continue
-            grep -q '<linux/task_work.h>' "$f" || sed -i '/#include <linux\/workqueue.h>/a #include <linux/task_work.h>' "$f" || true
-            grep -q '<linux/sched/task.h>' "$f" || sed -i '/#include <linux\/sched.h>/a #include <linux/sched/task.h>' "$f" || true
-            sed -i 's/task_work_add(tsk, cb, TWA_RESUME)/task_work_add(tsk, cb, true)/g' "$f"
+            # Bruteforce chèn header lên thẳng dòng 1
+            grep -q '<linux/task_work.h>' "$f" || sed -i '1i #include <linux/task_work.h>' "$f"
+            grep -q '<linux/sched/task.h>' "$f" || sed -i '1i #include <linux/sched/task.h>' "$f"
+            # Càn quét và thay thế mọi TWA_RESUME thành true
+            sed -i 's/\bTWA_RESUME\b/true/g' "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
 
           echo ">> compat result"
@@ -530,7 +532,7 @@ jobs:
           ccache -M 8G || true
           ccache -z || true
 
-          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
+          export PATH="${TC_DIR}/clang-primary/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
           export LLVM_PREFIX="${TC_DIR}/clang-primary/bin/"
           export KBUILD_BUILD_USER="github-actions"
           export KBUILD_BUILD_HOST="ubuntu-24.04"
@@ -635,22 +637,43 @@ jobs:
           )
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: TÓM TẮT LỖI BUILD
+      - name: TÓM TẮT LỖI BUILD (GHI RA SUMMARY)
         if: ${{ failure() }}
         shell: bash
         run: |
           set +e
-          echo "::group::TÓM TẮT LỖI BUILD"
-          for f in ./*.log; do
-            [ -f "$f" ] || continue
-            echo "===== $(basename "$f") ====="
-            echo "LỖI CHÍNH:"
-            grep -nEi 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|patching file |Hunk #[0-9]+ .*FAILED|reject file|missing|not found|warning:' "$f" | tail -n 25 || true
+          {
+            echo "## ❌ LỖI BIÊN DỊCH KERNEL (CORE ERRORS)"
             echo
-            echo "20 DÒNG CUỐI:"
-            tail -n 20 "$f" || true
+            echo "> Lỗi gốc đã được trích xuất tự động. Bạn không cần tải file log về nữa."
             echo
-          done
+            echo '```text'
+            
+            FAIL_LOG=""
+            for f in $(ls -1rt *.log 2>/dev/null); do
+              if grep -qiE 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|reject file' "$f"; then
+                FAIL_LOG="$f"
+              fi
+            done
+            
+            if [ -n "$FAIL_LOG" ]; then
+              # Trích xuất dòng lỗi kèm context (2 dòng trước, 2 dòng sau) giống mẫu
+              grep -nEi -B 2 -A 2 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|reject file' "$FAIL_LOG" | tail -n 30
+              echo "---------------------------------------------------------"
+              echo "[20 DÒNG CUỐI CỦA LOG]:"
+              tail -n 20 "$FAIL_LOG"
+            else
+              echo "Không tìm thấy chuỗi lỗi rõ ràng."
+              echo "---------------------------------------------------------"
+              echo "[20 DÒNG CUỐI CỦA LOG]:"
+              tail -n 20 $(ls -1rt *.log 2>/dev/null | tail -n 1) || true
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Vẫn in ra Console để tiện xem nhanh
+          echo "::group::XEM LỖI TRÊN CONSOLE"
+          cat "$GITHUB_STEP_SUMMARY"
           echo "::endgroup::"
 
       - name: Write job summary
@@ -659,18 +682,18 @@ jobs:
         run: |
           set +e
           {
-            echo "## SM7325 A52s SukiSU/SUSFS build summary"
+            echo "## 📋 SM7325 A52s Build Summary"
             echo
-            echo "- kernel_branch: `${{ github.event.inputs.kernel_branch }}`"
-            echo "- region: `${{ github.event.inputs.region }}`"
-            echo "- sukisu_ref: `${{ env.SUKISU_REF }}`"
-            echo "- defconfig: `${{ steps.cfg.outputs.defconfig || 'unresolved' }}`"
-            echo "- toolchain: `${{ steps.build.outputs.toolchain || 'failed-before-build' }}`"
-            echo
-            echo "### Tail of all logs"
-            echo '```text'
-            tail -n 80 ./*.log 2>/dev/null || true
-            echo '```'
+            echo "- **Kernel Branch:** \`${{ github.event.inputs.kernel_branch }}\`"
+            echo "- **Region:** \`${{ github.event.inputs.region }}\`"
+            echo "- **SukiSU Ref:** \`${{ env.SUKISU_REF }}\`"
+            echo "- **Defconfig:** \`${{ steps.cfg.outputs.defconfig || 'unresolved' }}\`"
+            echo "- **Toolchain:** \`${{ steps.build.outputs.toolchain || 'failed-before-build' }}\`"
+            
+            if [ "${{ job.status }}" == "success" ]; then
+              echo
+              echo "### ✅ BUILD THÀNH CÔNG"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Pack debug bundle
