@@ -601,6 +601,10 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
+          cat > "${GITHUB_WORKSPACE}/build-kernel.sh" <<'EOF'
+          set -euxo pipefail
+          cd "${GITHUB_WORKSPACE}/kernel"
+
           mkdir -p "$CCACHE_DIR"
           ccache -M 8G || true
           ccache -z || true
@@ -609,7 +613,7 @@ jobs:
           export LLVM_PREFIX="${TC_DIR}/clang-primary/bin/"
           export KBUILD_BUILD_USER="github-actions"
           export KBUILD_BUILD_HOST="ubuntu-24.04"
-          export LOCALVERSION="-${{ github.event.inputs.kernel_name }}-$(date +%Y%m%d-%H%M)"
+          export LOCALVERSION="-${KERNEL_NAME}-$(date +%Y%m%d-%H%M)"
           export CROSS_COMPILE="aarch64-linux-gnu-"
           export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
 
@@ -620,7 +624,7 @@ jobs:
             local llvm_flag="$4"
             local ias_flag="$5"
             local hostcc_bin="$6"
-            local out_dir="${{ steps.cfg.outputs.out_dir }}"
+            local out_dir="$OUT_DIR"
 
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
@@ -635,7 +639,8 @@ jobs:
               READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
               CLANG_TRIPLE="aarch64-linux-gnu-" \
               CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-              "vendor/${{ steps.cfg.outputs.defconfig }}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+              "vendor/${DEFCONFIG}" \
+              2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
 
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
               ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
@@ -657,11 +662,25 @@ jobs:
           else
             echo "::error::All toolchain attempts failed"
             exit 1
-          }
+          fi
 
-          test -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image"
-          file "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" || true
+          test -f "${OUT_DIR}/arch/arm64/boot/Image"
+          file "${OUT_DIR}/arch/arm64/boot/Image" || true
           ccache -s || true
+          EOF
+
+          chmod +x "${GITHUB_WORKSPACE}/build-kernel.sh"
+
+          export KERNEL_NAME="${{ github.event.inputs.kernel_name }}"
+          export DEFCONFIG="${{ steps.cfg.outputs.defconfig }}"
+          export OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
+
+          echo "::group::build-kernel.sh"
+          nl -ba "${GITHUB_WORKSPACE}/build-kernel.sh"
+          echo "::endgroup::"
+
+          bash -n "${GITHUB_WORKSPACE}/build-kernel.sh"
+          bash "${GITHUB_WORKSPACE}/build-kernel.sh"
 
       - name: Prepare AnyKernel3 package
         if: ${{ success() }}
