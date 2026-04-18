@@ -51,7 +51,7 @@ jobs:
       PLATFORM_VERSION: "16"
       TARGET_BUILD_VARIANT: user
       KERNEL_REPO: https://github.com/JingMatrix/samsung_sm7325
-      ANYKERNEL_REPO: https://github.com/SM7325-AE/AnyKernel3
+      ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
       SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
       SUKISU_REF: 911b075
       SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
@@ -456,6 +456,199 @@ jobs:
           fi
           grep -RIn 'apply_kernelsu_rules\|handle_sepolicy' KernelSU/kernel/selinux/rules.c drivers/kernelsu/selinux/rules.c 2>/dev/null || true
 
+          SELINUX_POLICYDB_HDR="security/selinux/ss/policydb.h"
+          if [ ! -f "$SELINUX_POLICYDB_HDR" ] || ! grep -q 'compat_filename_trans_count' "$SELINUX_POLICYDB_HDR"; then
+            echo "::warning::Legacy Samsung SELinux policydb detected; stubbing SukiSU selinux/sepolicy.c"
+
+            while IFS= read -r f; do
+              [ -f "$f" ] || continue
+              cat > "$f" <<'EOF'
+          // SPDX-License-Identifier: GPL-2.0
+          #include <linux/types.h>
+          #include <linux/printk.h>
+          #include "sepolicy.h"
+
+          static bool ksu_sepolicy_stub_ok(void)
+          {
+              static bool warned;
+              if (!warned) {
+                  pr_warn("ksu: legacy samsung 5.4 sepolicy backend stubbed\n");
+                  warned = true;
+              }
+              return true;
+          }
+
+          struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol)
+          {
+              ksu_sepolicy_stub_ok();
+              return old_pol;
+          }
+
+          void ksu_destroy_sepolicy(struct selinux_policy *orig)
+          {
+              (void)orig;
+          }
+
+          bool ksu_type(struct policydb *db, const char *name, const char *attr)
+          {
+              (void)db;
+              (void)name;
+              (void)attr;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_attribute(struct policydb *db, const char *name)
+          {
+              (void)db;
+              (void)name;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_permissive(struct policydb *db, const char *type)
+          {
+              (void)db;
+              (void)type;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_enforce(struct policydb *db, const char *type)
+          {
+              (void)db;
+              (void)type;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_typeattribute(struct policydb *db, const char *type, const char *attr)
+          {
+              (void)db;
+              (void)type;
+              (void)attr;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_exists(struct policydb *db, const char *type)
+          {
+              (void)db;
+              (void)type;
+              return false;
+          }
+
+          bool ksu_allow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)perm;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_deny(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)perm;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_auditallow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)perm;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)perm;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_allowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)range;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_auditallowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)range;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_dontauditxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)range;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_type_transition(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def, const char *obj)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)def;
+              (void)obj;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_type_change(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)def;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_type_member(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def)
+          {
+              (void)db;
+              (void)src;
+              (void)tgt;
+              (void)cls;
+              (void)def;
+              return ksu_sepolicy_stub_ok();
+          }
+
+          bool ksu_genfscon(struct policydb *db, const char *fs_name, const char *path, const char *ctx)
+          {
+              (void)db;
+              (void)fs_name;
+              (void)path;
+              (void)ctx;
+              return ksu_sepolicy_stub_ok();
+          }
+          EOF
+            done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
+          fi
+
+          grep -RIn 'legacy samsung 5.4 sepolicy backend stubbed\|ksu_dup_sepolicy' \
+            KernelSU/kernel/selinux/sepolicy.c drivers/kernelsu/selinux/sepolicy.c 2>/dev/null || true
+
           echo ">> compat result"
           grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
           grep -RIn 'KSU_SECCOMP_ARCH_FALLBACK\|SECCOMP_ARCH_NATIVE_NR' KernelSU/kernel/infra/seccomp_cache.c drivers/kernelsu/infra/seccomp_cache.c 2>/dev/null || true
@@ -720,30 +913,33 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel3
 
-          sed -i \
-            -e "s|^kernel.string=.*|kernel.string=${{ github.event.inputs.kernel_name }}|" \
-            -e 's|^device.name1=.*|device.name1=a52sxq|' \
-            -e 's|^is_slot_device=.*|is_slot_device=0|' \
-            -e 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0|' \
-            AnyKernel3/anykernel.sh
+          # Bàn tay sắt: Ghi đè file anykernel.sh tối giản (Pure-Image)
+          cat > AnyKernel3/anykernel.sh <<EOF
+          properties() {
+          kernel.string=${{ github.event.inputs.kernel_name }}
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=a52sxq
+          device.name2=a52sxqzt
+          device.name3=a52sxqks
+          supported.versions=
+          supported.patchlevels=
+          }
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
 
-          grep -q '^device.name2=' AnyKernel3/anykernel.sh \
-            && sed -i 's|^device.name2=.*|device.name2=a52sxqzt|' AnyKernel3/anykernel.sh \
-            || sed -i '/^device.name1=.*/a device.name2=a52sxqzt' AnyKernel3/anykernel.sh
-          grep -q '^device.name3=' AnyKernel3/anykernel.sh \
-            && sed -i 's|^device.name3=.*|device.name3=a52sxqks|' AnyKernel3/anykernel.sh \
-            || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          EOF
 
+          # Chỉ copy duy nhất lõi Kernel Image tinh khiết
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
-          if [ -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" ]; then
-            cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" AnyKernel3/dtbo.img
-          fi
-
-          DTB_FILE="$(find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -type f -name 'yupik*.dtb' | sort | head -n1)"
-          if [ -z "$DTB_FILE" ]; then
-            DTB_FILE="$(find "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot" -type f -name '*.dtb' | sort | head -n1)"
-          fi
-          [ -n "$DTB_FILE" ] && cp "$DTB_FILE" AnyKernel3/dtb || true
 
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
