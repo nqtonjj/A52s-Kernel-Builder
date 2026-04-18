@@ -209,11 +209,11 @@ jobs:
 
           mkdir -p include/linux/log
           cat > include/linux/log/perflog.h <<'EOF'
-#ifndef _LINUX_PERFLOG_H
-#define _LINUX_PERFLOG_H
-static inline void perf_log_printk(const char *fmt, ...) {}
-#endif
-EOF
+          #ifndef _LINUX_PERFLOG_H
+          #define _LINUX_PERFLOG_H
+          static inline void perf_log_printk(const char *fmt, ...) {}
+          #endif
+          EOF
 
           while IFS= read -r f; do
             [ -f "$f" ] || continue
@@ -224,29 +224,29 @@ EOF
             [ -f "$f" ] || continue
             grep -q '<asm/seccomp.h>' "$f" || sed -i '/#include <linux\/seccomp.h>/a #include <asm/seccomp.h>' "$f"
             python3 - "$f" <<'PY'
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-s = p.read_text()
-needle = '#include "infra/seccomp_cache.h"\n'
-insert = (
-    '#include "infra/seccomp_cache.h"\n\n'
-    '#ifndef SECCOMP_ARCH_NATIVE_NR\n'
-    '#define KSU_SECCOMP_ARCH_FALLBACK 1\n'
-    '#ifdef CONFIG_ARM64\n'
-    '#include <asm/unistd.h>\n'
-    '#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n'
-    '#ifdef CONFIG_COMPAT\n'
-    '#include <asm/unistd32.h>\n'
-    '#define SECCOMP_ARCH_COMPAT_NR __NR_compat32_syscalls\n'
-    '#endif\n'
-    '#endif\n'
-    '#endif\n'
-)
-if needle in s and 'KSU_SECCOMP_ARCH_FALLBACK' not in s:
-    s = s.replace(needle, insert, 1)
-    p.write_text(s)
-PY
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          needle = '#include "infra/seccomp_cache.h"\n'
+          insert = (
+              '#include "infra/seccomp_cache.h"\n\n'
+              '#ifndef SECCOMP_ARCH_NATIVE_NR\n'
+              '#define KSU_SECCOMP_ARCH_FALLBACK 1\n'
+              '#ifdef CONFIG_ARM64\n'
+              '#include <asm/unistd.h>\n'
+              '#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n'
+              '#ifdef CONFIG_COMPAT\n'
+              '#include <asm/unistd32.h>\n'
+              '#define SECCOMP_ARCH_COMPAT_NR __NR_compat32_syscalls\n'
+              '#endif\n'
+              '#endif\n'
+              '#endif\n'
+          )
+          if needle in s and 'KSU_SECCOMP_ARCH_FALLBACK' not in s:
+              s = s.replace(needle, insert, 1)
+              p.write_text(s)
+          PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/seccomp_cache.c' -type f 2>/dev/null)
 
           while IFS= read -r f; do
@@ -260,172 +260,172 @@ PY
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
-// SPDX-License-Identifier: GPL-2.0
-#include <linux/version.h>
-#include <linux/fsnotify_backend.h>
-#include <linux/namei.h>
-#include <linux/path.h>
-#include <linux/slab.h>
-#include <linux/string.h>
-#include <linux/fs.h>
-#include "klog.h"
-#include "manager/throne_tracker.h"
+          // SPDX-License-Identifier: GPL-2.0
+          #include <linux/version.h>
+          #include <linux/fsnotify_backend.h>
+          #include <linux/namei.h>
+          #include <linux/path.h>
+          #include <linux/slab.h>
+          #include <linux/string.h>
+          #include <linux/fs.h>
+          #include "klog.h"
+          #include "manager/throne_tracker.h"
 
-#define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
+          #define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
 
-struct watch_dir {
-    const char *path;
-    u32 mask;
-    struct path kpath;
-    struct inode *inode;
-    struct fsnotify_mark *mark;
-};
+          struct watch_dir {
+              const char *path;
+              u32 mask;
+              struct path kpath;
+              struct inode *inode;
+              struct fsnotify_mark *mark;
+          };
 
-static struct fsnotify_group *g;
+          static struct fsnotify_group *g;
 
-static int ksu_handle_event(struct fsnotify_group *group,
-                            struct inode *inode,
-                            u32 mask,
-                            const void *data,
-                            int data_type,
-                            const struct qstr *file_name,
-                            u32 cookie,
-                            struct fsnotify_iter_info *iter_info)
-{
-    if (!file_name)
-        return 0;
-    if (mask & FS_ISDIR)
-        return 0;
-    if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {
-        pr_info("packages.list detected: %u\n", mask);
-        track_throne(false);
-    }
-    return 0;
-}
+          static int ksu_handle_event(struct fsnotify_group *group,
+                                      struct inode *inode,
+                                      u32 mask,
+                                      const void *data,
+                                      int data_type,
+                                      const struct qstr *file_name,
+                                      u32 cookie,
+                                      struct fsnotify_iter_info *iter_info)
+          {
+              if (!file_name)
+                  return 0;
+              if (mask & FS_ISDIR)
+                  return 0;
+              if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {
+                  pr_info("packages.list detected: %u\n", mask);
+                  track_throne(false);
+              }
+              return 0;
+          }
 
-static const struct fsnotify_ops ksu_ops = {
-    .handle_event = ksu_handle_event,
-};
+          static const struct fsnotify_ops ksu_ops = {
+              .handle_event = ksu_handle_event,
+          };
 
-static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
-{
-    struct fsnotify_mark *m;
-    m = kzalloc(sizeof(*m), GFP_KERNEL);
-    if (!m)
-        return -ENOMEM;
-    fsnotify_init_mark(m, g);
-    m->mask = mask;
-    if (fsnotify_add_inode_mark(m, inode, 0)) {
-        fsnotify_put_mark(m);
-        return -EINVAL;
-    }
-    *out = m;
-    return 0;
-}
+          static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
+          {
+              struct fsnotify_mark *m;
+              m = kzalloc(sizeof(*m), GFP_KERNEL);
+              if (!m)
+                  return -ENOMEM;
+              fsnotify_init_mark(m, g);
+              m->mask = mask;
+              if (fsnotify_add_inode_mark(m, inode, 0)) {
+                  fsnotify_put_mark(m);
+                  return -EINVAL;
+              }
+              *out = m;
+              return 0;
+          }
 
-static int watch_one_dir(struct watch_dir *wd)
-{
-    int ret = kern_path(wd->path, LOOKUP_FOLLOW, &wd->kpath);
-    if (ret) {
-        pr_info("path not ready: %s (%d)\n", wd->path, ret);
-        return ret;
-    }
-    wd->inode = d_inode(wd->kpath.dentry);
-    ihold(wd->inode);
-    ret = add_mark_on_inode(wd->inode, wd->mask, &wd->mark);
-    if (ret) {
-        pr_err("Add mark failed for %s (%d)\n", wd->path, ret);
-        path_put(&wd->kpath);
-        iput(wd->inode);
-        wd->inode = NULL;
-        return ret;
-    }
-    pr_info("watching %s\n", wd->path);
-    return ret;
-}
+          static int watch_one_dir(struct watch_dir *wd)
+          {
+              int ret = kern_path(wd->path, LOOKUP_FOLLOW, &wd->kpath);
+              if (ret) {
+                  pr_info("path not ready: %s (%d)\n", wd->path, ret);
+                  return ret;
+              }
+              wd->inode = d_inode(wd->kpath.dentry);
+              ihold(wd->inode);
+              ret = add_mark_on_inode(wd->inode, wd->mask, &wd->mark);
+              if (ret) {
+                  pr_err("Add mark failed for %s (%d)\n", wd->path, ret);
+                  path_put(&wd->kpath);
+                  iput(wd->inode);
+                  wd->inode = NULL;
+                  return ret;
+              }
+              pr_info("watching %s\n", wd->path);
+              return ret;
+          }
 
-static void unwatch_one_dir(struct watch_dir *wd)
-{
-    if (wd->mark) {
-        fsnotify_destroy_mark(wd->mark, g);
-        fsnotify_put_mark(wd->mark);
-        wd->mark = NULL;
-    }
-    if (wd->inode) {
-        iput(wd->inode);
-        wd->inode = NULL;
-    }
-    if (wd->kpath.dentry) {
-        path_put(&wd->kpath);
-        memset(&wd->kpath, 0, sizeof(wd->kpath));
-    }
-}
+          static void unwatch_one_dir(struct watch_dir *wd)
+          {
+              if (wd->mark) {
+                  fsnotify_destroy_mark(wd->mark, g);
+                  fsnotify_put_mark(wd->mark);
+                  wd->mark = NULL;
+              }
+              if (wd->inode) {
+                  iput(wd->inode);
+                  wd->inode = NULL;
+              }
+              if (wd->kpath.dentry) {
+                  path_put(&wd->kpath);
+                  memset(&wd->kpath, 0, sizeof(wd->kpath));
+              }
+          }
 
-static struct watch_dir g_watch = {
-    .path = "/data/system",
-    .mask = MASK_SYSTEM,
-};
+          static struct watch_dir g_watch = {
+              .path = "/data/system",
+              .mask = MASK_SYSTEM,
+          };
 
-int ksu_observer_init(void)
-{
-    int ret = 0;
-    g = fsnotify_alloc_group(&ksu_ops);
-    if (IS_ERR(g))
-        return PTR_ERR(g);
-    ret = watch_one_dir(&g_watch);
-    pr_info("observer init done\n");
-    return ret;
-}
+          int ksu_observer_init(void)
+          {
+              int ret = 0;
+              g = fsnotify_alloc_group(&ksu_ops);
+              if (IS_ERR(g))
+                  return PTR_ERR(g);
+              ret = watch_one_dir(&g_watch);
+              pr_info("observer init done\n");
+              return ret;
+          }
 
-void __exit ksu_observer_exit(void)
-{
-    unwatch_one_dir(&g_watch);
-    fsnotify_put_group(g);
-    pr_info("observer exit done\n");
-}
-EOF
+          void __exit ksu_observer_exit(void)
+          {
+              unwatch_one_dir(&g_watch);
+              fsnotify_put_group(g);
+              pr_info("observer exit done\n");
+          }
+          EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
-import re
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-s = p.read_text()
-if '#include <linux/task_work.h>' not in s:
-    s = '#include <linux/task_work.h>\n' + s
-if '#include <linux/sched/task.h>' not in s:
-    s = '#include <linux/sched/task.h>\n' + s
-if '#ifndef TWA_RESUME' not in s:
-    s = '#ifndef TWA_RESUME\n#define TWA_RESUME true\n#endif\n' + s
-s = re.sub(r'task_work_add\s*\(([^,]+),\s*([^,]+),\s*TWA_RESUME\)', r'task_work_add(\1, \2, true)', s)
-p.write_text(s)
-PY
+          import re
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          if '#include <linux/task_work.h>' not in s:
+              s = '#include <linux/task_work.h>\n' + s
+          if '#include <linux/sched/task.h>' not in s:
+              s = '#include <linux/sched/task.h>\n' + s
+          if '#ifndef TWA_RESUME' not in s:
+              s = '#ifndef TWA_RESUME\n#define TWA_RESUME true\n#endif\n' + s
+          s = re.sub(r'task_work_add\s*\(([^,]+),\s*([^,]+),\s*TWA_RESUME\)', r'task_work_add(\1, \2, true)', s)
+          p.write_text(s)
+          PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
 
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
-import re
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-s = p.read_text()
-if '#include <linux/seccomp.h>' not in s:
-    s = '#include <linux/seccomp.h>\n' + s
-if '#include <linux/sched/task.h>' not in s:
-    s = '#include <linux/sched/task.h>\n' + s
-s = re.sub(r'^\s*void\s+seccomp_filter_release\s*\([^\n]*\);\s*\n?', '', s, flags=re.M)
-s = re.sub(
-    r'static\s+void\s+disable_seccomp\s*\(\s*void\s*\)\s*\{[\s\S]*?\n\}',
-    'static void disable_seccomp(void)\n{\n\t/* samsung 5.4 stub: old seccomp layout, skip disable_seccomp path */\n}\n',
-    s,
-    count=1,
-)
-p.write_text(s)
-PY
+          import re
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          if '#include <linux/seccomp.h>' not in s:
+              s = '#include <linux/seccomp.h>\n' + s
+          if '#include <linux/sched/task.h>' not in s:
+              s = '#include <linux/sched/task.h>\n' + s
+          s = re.sub(r'^\s*void\s+seccomp_filter_release\s*\([^\n]*\);\s*\n?', '', s, flags=re.M)
+          s = re.sub(
+              r'static\s+void\s+disable_seccomp\s*\(\s*void\s*\)\s*\{[\s\S]*?\n\}',
+              'static void disable_seccomp(void)\n{\n\t/* samsung 5.4 stub: old seccomp layout, skip disable_seccomp path */\n}\n',
+              s,
+              count=1,
+          )
+          p.write_text(s)
+          PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
           echo ">> compat result"
@@ -458,17 +458,17 @@ PY
             if ! grep -q 'susfs_fd_link' "$target"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
-\
-#ifdef CONFIG_KSU_SUSFS\
-\tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
-#endif
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+          #endif
                 }' "$target"
               elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "$target"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
-\
-#ifdef CONFIG_KSU_SUSFS\
-\tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
-#endif
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+          #endif
                 }' "$target"
               else
                 echo "::error::Could not locate proc_fd_link signature in ${target}"
@@ -657,7 +657,7 @@ PY
           else
             echo "::error::All toolchain attempts failed"
             exit 1
-          fi
+          }
 
           test -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image"
           file "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" || true
