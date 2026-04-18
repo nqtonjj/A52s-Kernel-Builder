@@ -21,7 +21,7 @@ on:
         required: true
         default: "A52s-SukiSU-Ultra-SUSFS"
       security_mode:
-        description: "Samsung Security Stripping Mode"
+        description: "Samsung security mode"
         required: true
         type: choice
         default: "minimal"
@@ -103,7 +103,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-proton-hostfix-v5
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-clean-v1
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -152,9 +152,9 @@ jobs:
 
           if [[ "${SUKISU_REF}" =~ ^[0-9a-f]{7,40}$ ]]; then
             git clone --filter=blob:none --no-checkout "${SUKISU_REPO}" KernelSU
-            git -C KernelSU fetch --depth=200 origin main
+            git -C KernelSU fetch --depth=256 origin main
             git -C KernelSU checkout "${SUKISU_REF}" || {
-              git -C KernelSU fetch --depth=1000 origin main
+              git -C KernelSU fetch --depth=2048 origin main
               git -C KernelSU checkout "${SUKISU_REF}"
             }
           else
@@ -162,7 +162,6 @@ jobs:
           fi
 
           test -d KernelSU/kernel
-
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
           sed -i '/kernelsu\//d' drivers/Makefile
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
@@ -183,7 +182,6 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
-          # Cleanup kpm remnants
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
@@ -192,61 +190,66 @@ jobs:
             [ -f "$f" ] && sed -i '/kpm\/Kconfig/d' "$f" || true
           done
 
-          # Basic headers compat (pgtable -> mm)
-          find KernelSU drivers/kernelsu -type f -name '*.[ch]' -print0 2>/dev/null | while IFS= read -r -d '' f; do
-            if grep -q '<linux/pgtable.h>' "$f"; then
-              sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
-            fi
-          done || true
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
+          done < <(grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          # Uaccess nofault compat
-          find KernelSU drivers/kernelsu -type f -name '*.[ch]' -print0 2>/dev/null | while IFS= read -r -d '' f; do
-            if grep -qE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' "$f"; then
-              sed -i \
-                -e 's/strncpy_from_user_nofault/strncpy_from_user/g' \
-                -e 's/copy_from_user_nofault/copy_from_user/g' \
-                -e 's/copy_to_user_nofault/copy_to_user/g' \
-                -e 's/copy_from_kernel_nofault/probe_kernel_read/g' \
-                -e 's/copy_to_kernel_nofault/probe_kernel_write/g' \
-                "$f"
-              grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
-            fi
-          done || true
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            sed -i \
+              -e 's/strncpy_from_user_nofault/strncpy_from_user/g' \
+              -e 's/copy_from_user_nofault/copy_from_user/g' \
+              -e 's/copy_to_user_nofault/copy_to_user/g' \
+              -e 's/copy_from_kernel_nofault/probe_kernel_read/g' \
+              -e 's/copy_to_kernel_nofault/probe_kernel_write/g' \
+              "$f"
+            grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
+          done < <(grep -RIlE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          # Perflog mock
           mkdir -p include/linux/log
           cat > include/linux/log/perflog.h <<'EOF'
-          #ifndef _LINUX_PERFLOG_H
-          #define _LINUX_PERFLOG_H
-          static inline void perf_log_printk(const char *fmt, ...) {}
-          #endif
-          EOF
+#ifndef _LINUX_PERFLOG_H
+#define _LINUX_PERFLOG_H
+static inline void perf_log_printk(const char *fmt, ...) {}
+#endif
+EOF
 
-          find KernelSU drivers/kernelsu -type f -name '*.[ch]' -print0 2>/dev/null | while IFS= read -r -d '' f; do
-            if grep -q 'perflog.h' "$f"; then
-              sed -i 's|<log/perflog.h>|<linux/log/perflog.h>|g' "$f"
-            fi
-          done || true
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            sed -i 's|<log/perflog.h>|<linux/log/perflog.h>|g' "$f"
+          done < <(grep -RIl --include='*.c' --include='*.h' 'perflog.h' kernel drivers fs KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          # 1. Patch seccomp_cache.c
-          while read -r f; do
+          while IFS= read -r f; do
             [ -f "$f" ] || continue
             grep -q '<asm/seccomp.h>' "$f" || sed -i '/#include <linux\/seccomp.h>/a #include <asm/seccomp.h>' "$f"
             python3 - "$f" <<'PY'
-          import sys
-          from pathlib import Path
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          needle = '#include "infra/seccomp_cache.h"\n'
-          insert = '#include "infra/seccomp_cache.h"\n\n#ifndef SECCOMP_ARCH_NATIVE_NR\n#define KSU_SECCOMP_ARCH_FALLBACK 1\n#ifdef CONFIG_ARM64\n#include <asm/unistd.h>\n#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n#ifdef CONFIG_COMPAT\n#include <asm/unistd32.h>\n#define SECCOMP_ARCH_COMPAT_NR __NR_compat32_syscalls\n#endif\n#endif\n#endif\n'
-          if needle in s and 'KSU_SECCOMP_ARCH_FALLBACK' not in s:
-              s = s.replace(needle, insert, 1)
-              p.write_text(s)
-          PY
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+needle = '#include "infra/seccomp_cache.h"\n'
+insert = (
+    '#include "infra/seccomp_cache.h"\n\n'
+    '#ifndef SECCOMP_ARCH_NATIVE_NR\n'
+    '#define KSU_SECCOMP_ARCH_FALLBACK 1\n'
+    '#ifdef CONFIG_ARM64\n'
+    '#include <asm/unistd.h>\n'
+    '#define SECCOMP_ARCH_NATIVE_NR __NR_syscalls\n'
+    '#ifdef CONFIG_COMPAT\n'
+    '#include <asm/unistd32.h>\n'
+    '#define SECCOMP_ARCH_COMPAT_NR __NR_compat32_syscalls\n'
+    '#endif\n'
+    '#endif\n'
+    '#endif\n'
+)
+if needle in s and 'KSU_SECCOMP_ARCH_FALLBACK' not in s:
+    s = s.replace(needle, insert, 1)
+    p.write_text(s)
+PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/seccomp_cache.c' -type f 2>/dev/null)
 
-          # 2. Patch file_wrapper.c
-          while read -r f; do
+          while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i \
               -e 's/security_inode_init_security_anon(inode, \&qname, context_inode)/security_inode_init_security(inode, (struct inode *)context_inode, \&qname, NULL, NULL)/g' \
@@ -254,169 +257,175 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          # 3. Patch pkg_observer.c (Rewrite completely)
-          while read -r f; do
+          while IFS= read -r f; do
             [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          #include <linux/version.h>
-          #include <linux/fsnotify_backend.h>
-          #include <linux/namei.h>
-          #include <linux/path.h>
-          #include <linux/slab.h>
-          #include <linux/string.h>
-          #include <linux/fs.h>
-          #include "klog.h"
-          #include "manager/throne_tracker.h"
+// SPDX-License-Identifier: GPL-2.0
+#include <linux/version.h>
+#include <linux/fsnotify_backend.h>
+#include <linux/namei.h>
+#include <linux/path.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/fs.h>
+#include "klog.h"
+#include "manager/throne_tracker.h"
 
-          #define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
+#define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
 
-          struct watch_dir {
-          	const char *path;
-          	u32 mask;
-          	struct path kpath;
-          	struct inode *inode;
-          	struct fsnotify_mark *mark;
-          };
+struct watch_dir {
+    const char *path;
+    u32 mask;
+    struct path kpath;
+    struct inode *inode;
+    struct fsnotify_mark *mark;
+};
 
-          static struct fsnotify_group *g;
+static struct fsnotify_group *g;
 
-          static int ksu_handle_event(struct fsnotify_group *group,
-          			    struct inode *inode,
-          			    u32 mask,
-          			    const void *data,
-          			    int data_type,
-          			    const struct qstr *file_name,
-          			    u32 cookie,
-          			    struct fsnotify_iter_info *iter_info)
-          {
-          	if (!file_name)
-          		return 0;
-          	if (mask & FS_ISDIR)
-          		return 0;
-          	if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {
-          		pr_info("packages.list detected: %u\n", mask);
-          		track_throne(false);
-          	}
-          	return 0;
-          }
+static int ksu_handle_event(struct fsnotify_group *group,
+                            struct inode *inode,
+                            u32 mask,
+                            const void *data,
+                            int data_type,
+                            const struct qstr *file_name,
+                            u32 cookie,
+                            struct fsnotify_iter_info *iter_info)
+{
+    if (!file_name)
+        return 0;
+    if (mask & FS_ISDIR)
+        return 0;
+    if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {
+        pr_info("packages.list detected: %u\n", mask);
+        track_throne(false);
+    }
+    return 0;
+}
 
-          static const struct fsnotify_ops ksu_ops = {
-          	.handle_event = ksu_handle_event,
-          };
+static const struct fsnotify_ops ksu_ops = {
+    .handle_event = ksu_handle_event,
+};
 
-          static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
-          {
-          	struct fsnotify_mark *m;
-          	m = kzalloc(sizeof(*m), GFP_KERNEL);
-          	if (!m)
-          		return -ENOMEM;
-          	fsnotify_init_mark(m, g);
-          	m->mask = mask;
-          	if (fsnotify_add_inode_mark(m, inode, 0)) {
-          		fsnotify_put_mark(m);
-          		return -EINVAL;
-          	}
-          	*out = m;
-          	return 0;
-          }
+static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
+{
+    struct fsnotify_mark *m;
+    m = kzalloc(sizeof(*m), GFP_KERNEL);
+    if (!m)
+        return -ENOMEM;
+    fsnotify_init_mark(m, g);
+    m->mask = mask;
+    if (fsnotify_add_inode_mark(m, inode, 0)) {
+        fsnotify_put_mark(m);
+        return -EINVAL;
+    }
+    *out = m;
+    return 0;
+}
 
-          static int watch_one_dir(struct watch_dir *wd)
-          {
-          	int ret = kern_path(wd->path, LOOKUP_FOLLOW, &wd->kpath);
-          	if (ret) {
-          		pr_info("path not ready: %s (%d)\n", wd->path, ret);
-          		return ret;
-          	}
-          	wd->inode = d_inode(wd->kpath.dentry);
-          	ihold(wd->inode);
-          	ret = add_mark_on_inode(wd->inode, wd->mask, &wd->mark);
-          	if (ret) {
-          		pr_err("Add mark failed for %s (%d)\n", wd->path, ret);
-          		path_put(&wd->kpath);
-          		iput(wd->inode);
-          		wd->inode = NULL;
-          		return ret;
-          	}
-          	pr_info("watching %s\n", wd->path);
-          	return ret;
-          }
+static int watch_one_dir(struct watch_dir *wd)
+{
+    int ret = kern_path(wd->path, LOOKUP_FOLLOW, &wd->kpath);
+    if (ret) {
+        pr_info("path not ready: %s (%d)\n", wd->path, ret);
+        return ret;
+    }
+    wd->inode = d_inode(wd->kpath.dentry);
+    ihold(wd->inode);
+    ret = add_mark_on_inode(wd->inode, wd->mask, &wd->mark);
+    if (ret) {
+        pr_err("Add mark failed for %s (%d)\n", wd->path, ret);
+        path_put(&wd->kpath);
+        iput(wd->inode);
+        wd->inode = NULL;
+        return ret;
+    }
+    pr_info("watching %s\n", wd->path);
+    return ret;
+}
 
-          static void unwatch_one_dir(struct watch_dir *wd)
-          {
-          	if (wd->mark) {
-          		fsnotify_destroy_mark(wd->mark, g);
-          		fsnotify_put_mark(wd->mark);
-          		wd->mark = NULL;
-          	}
-          	if (wd->inode) {
-          		iput(wd->inode);
-          		wd->inode = NULL;
-          	}
-          	if (wd->kpath.dentry) {
-          		path_put(&wd->kpath);
-          		memset(&wd->kpath, 0, sizeof(wd->kpath));
-          	}
-          }
+static void unwatch_one_dir(struct watch_dir *wd)
+{
+    if (wd->mark) {
+        fsnotify_destroy_mark(wd->mark, g);
+        fsnotify_put_mark(wd->mark);
+        wd->mark = NULL;
+    }
+    if (wd->inode) {
+        iput(wd->inode);
+        wd->inode = NULL;
+    }
+    if (wd->kpath.dentry) {
+        path_put(&wd->kpath);
+        memset(&wd->kpath, 0, sizeof(wd->kpath));
+    }
+}
 
-          static struct watch_dir g_watch = {
-          	.path = "/data/system",
-          	.mask = MASK_SYSTEM,
-          };
+static struct watch_dir g_watch = {
+    .path = "/data/system",
+    .mask = MASK_SYSTEM,
+};
 
-          int ksu_observer_init(void)
-          {
-          	int ret = 0;
-          	g = fsnotify_alloc_group(&ksu_ops);
-          	if (IS_ERR(g))
-          		return PTR_ERR(g);
-          	ret = watch_one_dir(&g_watch);
-          	pr_info("observer init done\n");
-          	return ret;
-          }
+int ksu_observer_init(void)
+{
+    int ret = 0;
+    g = fsnotify_alloc_group(&ksu_ops);
+    if (IS_ERR(g))
+        return PTR_ERR(g);
+    ret = watch_one_dir(&g_watch);
+    pr_info("observer init done\n");
+    return ret;
+}
 
-          void __exit ksu_observer_exit(void)
-          {
-          	unwatch_one_dir(&g_watch);
-          	fsnotify_put_group(g);
-          	pr_info("observer exit done\n");
-          }
-          EOF
+void __exit ksu_observer_exit(void)
+{
+    unwatch_one_dir(&g_watch);
+    fsnotify_put_group(g);
+    pr_info("observer exit done\n");
+}
+EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          # 4. STUB CỨNG ALLOWLIST.C
-          while read -r f; do
+          while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          if '#include <linux/task_work.h>' not in s: s = '#include <linux/task_work.h>\n' + s
-          if '#include <linux/sched/task.h>' not in s: s = '#include <linux/sched/task.h>\n' + s
-          if '#ifndef TWA_RESUME' not in s: s = '#ifndef TWA_RESUME\n#define TWA_RESUME true\n#endif\n' + s
-          s = re.sub(r'task_work_add\s*\(([^,]+),\s*([^,]+),\s*TWA_RESUME\)', r'task_work_add(\1, \2, true)', s)
-          p.write_text(s)
-          PY
+import re
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+if '#include <linux/task_work.h>' not in s:
+    s = '#include <linux/task_work.h>\n' + s
+if '#include <linux/sched/task.h>' not in s:
+    s = '#include <linux/sched/task.h>\n' + s
+if '#ifndef TWA_RESUME' not in s:
+    s = '#ifndef TWA_RESUME\n#define TWA_RESUME true\n#endif\n' + s
+s = re.sub(r'task_work_add\s*\(([^,]+),\s*([^,]+),\s*TWA_RESUME\)', r'task_work_add(\1, \2, true)', s)
+p.write_text(s)
+PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
 
-          # 5. STUB CỨNG APP_PROFILE.C
-          while read -r f; do
+          while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          if '#include <linux/seccomp.h>' not in s: s = '#include <linux/seccomp.h>\n' + s
-          if '#include <linux/sched/task.h>' not in s: s = '#include <linux/sched/task.h>\n' + s
-          s = re.sub(r'atomic_set\(&current->seccomp\.filter_count,\s*0\);', '/* stubbed current filter_count */', s)
-          s = re.sub(r'atomic_set\(&tsk->seccomp\.filter_count,\s*0\);', '/* stubbed tsk filter_count */', s)
-          s = re.sub(r'seccomp_filter_release\([^)]+\);', '/* stubbed seccomp_filter_release */', s)
-          p.write_text(s)
-          PY
+import re
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+if '#include <linux/seccomp.h>' not in s:
+    s = '#include <linux/seccomp.h>\n' + s
+if '#include <linux/sched/task.h>' not in s:
+    s = '#include <linux/sched/task.h>\n' + s
+s = re.sub(r'^\s*void\s+seccomp_filter_release\s*\([^\n]*\);\s*\n?', '', s, flags=re.M)
+s = re.sub(
+    r'static\s+void\s+disable_seccomp\s*\(\s*void\s*\)\s*\{[\s\S]*?\n\}',
+    'static void disable_seccomp(void)\n{\n\t/* samsung 5.4 stub: old seccomp layout, skip disable_seccomp path */\n}\n',
+    s,
+    count=1,
+)
+p.write_text(s)
+PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
           echo ">> compat result"
@@ -449,17 +458,17 @@ jobs:
             if ! grep -q 'susfs_fd_link' "$target"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS\
-          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
-          #endif
+\
+#ifdef CONFIG_KSU_SUSFS\
+\tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+#endif
                 }' "$target"
               elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "$target"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS\
-          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
-          #endif
+\
+#ifdef CONFIG_KSU_SUSFS\
+\tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+#endif
                 }' "$target"
               else
                 echo "::error::Could not locate proc_fd_link signature in ${target}"
@@ -524,7 +533,7 @@ jobs:
           ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c
           echo "::endgroup::"
 
-      - name: Patch A52s defconfig and disable Samsung security gates
+      - name: Patch A52s defconfig and Samsung security mode
         shell: bash
         run: |
           set -euxo pipefail
@@ -547,21 +556,17 @@ jobs:
           enable_cfg CONFIG_KSU
           enable_cfg CONFIG_KSU_MANUAL_HOOK
           enable_cfg CONFIG_KSU_SUSFS
-          
-          # Luôn tắt các debug/trace của KSU
           disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
           disable_cfg CONFIG_KSU_NONE_HOOK
           disable_cfg CONFIG_KSU_DEBUG
-          
-          # Luôn tắt 2 cờ cốt lõi chặn Boot/Root
+
           disable_cfg CONFIG_KNOX
           disable_cfg CONFIG_KNOX_GUARD
           disable_cfg CONFIG_SEC_RESTRICT_SETUID
           disable_cfg CONFIG_SEC_RESTRICT_ROOTING
 
-          # Phân tách Mode Tác Chiến
-          if [ "${{ github.event.inputs.security_mode }}" == "aggressive" ]; then
-            echo "::warning::Kích hoạt Aggressive Mode: Stripping toàn bộ bảo mật Samsung!"
+          if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
+            echo "::warning::Aggressive mode: stripping DEFEX/PROCA/RKP/TIMA"
             for key in \
               CONFIG_SECURITY_DEFEX \
               CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
@@ -580,7 +585,7 @@ jobs:
               disable_cfg "$key"
             done
           else
-            echo "::notice::Kích hoạt Minimal Boot-Safe Mode: Giữ lại DEFEX/PROCA/RKP/TIMA để ưu tiên Boot."
+            echo "::notice::Minimal mode: keep DEFEX/PROCA/RKP/TIMA to prioritize boot"
           fi
 
           echo "::group::Defconfig flags"
@@ -683,7 +688,6 @@ jobs:
             || sed -i '/^device.name2=.*/a device.name3=a52sxqks' AnyKernel3/anykernel.sh
 
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
-
           if [ -f "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" ]; then
             cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img" AnyKernel3/dtbo.img
           fi
@@ -698,59 +702,26 @@ jobs:
           (
             cd AnyKernel3
             zip -r9 "../$ZIP_NAME" . \
-              -x '.git/*' \
-                 '.github/*' \
-                 'README.md' \
-                 '*.gitignore'
+              -x '.git/*' '.github/*' 'README.md' '*.gitignore'
           )
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: TÓM TẮT LỖI BUILD (GHI RA SUMMARY)
+      - name: TÓM TẮT LỖI BUILD
         if: ${{ failure() }}
         shell: bash
         run: |
           set +e
-          {
-            echo "## ❌ LỖI BIÊN DỊCH KERNEL (CORE ERRORS)"
+          echo "::group::TÓM TẮT LỖI BUILD"
+          for f in ./*.log; do
+            [ -f "$f" ] || continue
+            echo "===== $(basename "$f") ====="
+            echo "LỖI CHÍNH:"
+            grep -nEi 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|patching file |Hunk #[0-9]+ .*FAILED|reject file|missing|not found|warning:' "$f" | tail -n 25 || true
             echo
-            echo "> Lỗi gốc đã được trích xuất tự động. Bạn không cần tải file log về nữa."
+            echo "20 DÒNG CUỐI:"
+            tail -n 20 "$f" || true
             echo
-            
-            FAIL_LOG=""
-            for f in $(ls -1rt *.log 2>/dev/null); do
-              if grep -qiE 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|reject file' "$f"; then
-                FAIL_LOG="$f"
-              fi
-            done
-            
-            if [ -n "$FAIL_LOG" ]; then
-              FAIL_FILE=$(grep -oP "(?<=/kernel/).*?\.[ch](?=:)" "$FAIL_LOG" | head -n 1 || echo "Không xác định")
-              API_MISMATCH=$(grep -m 1 -iE 'error: |fatal error: ' "$FAIL_LOG" | sed 's/.*error: //' || echo "Không xác định")
-              
-              echo "### 🔍 CHUẨN ĐOÁN NHANH"
-              echo "- **FILE GÂY CHẾT:** \`$FAIL_FILE\`"
-              echo "- **API MISMATCH NGHI PHẠM:** \`$API_MISMATCH\`"
-              echo
-              echo "---"
-              echo "#### CHI TIẾT LỖI TỪ COMPILER:"
-              echo '```text'
-              grep -nEi -B 2 -A 2 'fatal:|fatal error:|\berror:|undefined reference|No rule to make target|FAILED:|reject file' "$FAIL_LOG" | tail -n 30
-              echo "---------------------------------------------------------"
-              echo "[20 DÒNG CUỐI CỦA LOG]:"
-              tail -n 20 "$FAIL_LOG"
-              echo '```'
-            else
-              echo '```text'
-              echo "Không tìm thấy chuỗi lỗi rõ ràng."
-              echo "---------------------------------------------------------"
-              echo "[20 DÒNG CUỐI CỦA LOG]:"
-              tail -n 20 $(ls -1rt *.log 2>/dev/null | tail -n 1) || true
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "::group::XEM LỖI TRÊN CONSOLE"
-          cat "$GITHUB_STEP_SUMMARY"
+          done
           echo "::endgroup::"
 
       - name: Write job summary
@@ -759,19 +730,19 @@ jobs:
         run: |
           set +e
           {
-            echo "## 📋 SM7325 A52s Build Summary"
+            echo "## SM7325 A52s SukiSU/SUSFS build summary"
             echo
-            echo "- **Kernel Branch:** \`${{ github.event.inputs.kernel_branch }}\`"
-            echo "- **Region:** \`${{ github.event.inputs.region }}\`"
-            echo "- **Security Mode:** \`${{ github.event.inputs.security_mode }}\`"
-            echo "- **SukiSU Ref:** \`${{ env.SUKISU_REF }}\`"
-            echo "- **Defconfig:** \`${{ steps.cfg.outputs.defconfig || 'unresolved' }}\`"
-            echo "- **Toolchain:** \`${{ steps.build.outputs.toolchain || 'failed-before-build' }}\`"
-            
-            if [ "${{ job.status }}" == "success" ]; then
-              echo
-              echo "### ✅ BUILD THÀNH CÔNG"
-            fi
+            echo "- kernel_branch: `${{ github.event.inputs.kernel_branch }}`"
+            echo "- region: `${{ github.event.inputs.region }}`"
+            echo "- security_mode: `${{ github.event.inputs.security_mode }}`"
+            echo "- sukisu_ref: `${{ env.SUKISU_REF }}`"
+            echo "- defconfig: `${{ steps.cfg.outputs.defconfig || 'unresolved' }}`"
+            echo "- toolchain: `${{ steps.build.outputs.toolchain || 'failed-before-build' }}`"
+            echo
+            echo "### Tail of all logs"
+            echo '```text'
+            tail -n 80 ./*.log 2>/dev/null || true
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Pack debug bundle
