@@ -680,6 +680,27 @@ jobs:
           #endif
           EOF
 
+          # === FIX missing headers in dispatch.c ===
+          echo "::notice::Injecting missing sched headers for dispatch.c"
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY'
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          headers = [
+              '#include <linux/sched.h>',
+              '#include <linux/sched/signal.h>',
+              '#include <linux/sched/task.h>'
+          ]
+          for h in reversed(headers):
+              if h not in s:
+                  s = h + '\n' + s
+          p.write_text(s)
+          PY
+          done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
+
           echo ">> compat result"
           grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
           grep -RIn 'KSU_SECCOMP_ARCH_FALLBACK\|SECCOMP_ARCH_NATIVE_NR' KernelSU/kernel/infra/seccomp_cache.c drivers/kernelsu/infra/seccomp_cache.c 2>/dev/null || true
