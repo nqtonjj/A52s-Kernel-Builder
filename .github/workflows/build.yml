@@ -182,7 +182,9 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
+          # === HARD DISABLE KPM: scrub source refs + create fake header ===
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
+
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
           done
@@ -192,9 +194,33 @@ jobs:
 
           while IFS= read -r f; do
             [ -f "$f" ] || continue
+            sed -i '/#include "kpm\/kpm.h"/d' "$f"
+          done < <(grep -RIl --include='*.c' --include='*.h' 'kpm/kpm.h' KernelSU drivers/kernelsu 2>/dev/null || true)
+
+          mkdir -p KernelSU/kernel/kpm drivers/kernelsu/kpm
+          cat > KernelSU/kernel/kpm/kpm.h <<'EOF'
+          #ifndef __SUKISU_KPM_H
+          #define __SUKISU_KPM_H
+          #include <linux/types.h>
+          #include <linux/ioctl.h>
+          #define CMD_KPM_CONTROL 1
+          #define CMD_KPM_CONTROL_MAX 10
+          static inline int kpm_disabled_stub(void) { return -EOPNOTSUPP; }
+          #endif
+          EOF
+          cp -f KernelSU/kernel/kpm/kpm.h drivers/kernelsu/kpm/kpm.h
+
+          echo "::group::KPM scrub result"
+          grep -RIn 'kpm/kpm.h\|CMD_KPM_CONTROL\|Enable SukiSU KPM' KernelSU drivers/kernelsu 2>/dev/null || true
+          echo "::endgroup::"
+
+          # === FIX pgtable.h ===
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
             sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null || true)
 
+          # === FIX _nofault functions ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i \
@@ -207,6 +233,7 @@ jobs:
             grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
           done < <(grep -RIlE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' KernelSU drivers/kernelsu 2>/dev/null || true)
 
+          # === FIX perflog.h ===
           mkdir -p include/linux/log
           cat > include/linux/log/perflog.h <<'EOF'
           #ifndef _LINUX_PERFLOG_H
@@ -220,6 +247,7 @@ jobs:
             sed -i 's|<log/perflog.h>|<linux/log/perflog.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'perflog.h' kernel drivers fs KernelSU drivers/kernelsu 2>/dev/null || true)
 
+          # === FIX seccomp_cache.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             grep -q '<asm/seccomp.h>' "$f" || sed -i '/#include <linux\/seccomp.h>/a #include <asm/seccomp.h>' "$f"
@@ -249,6 +277,7 @@ jobs:
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/seccomp_cache.c' -type f 2>/dev/null)
 
+          # === FIX file_wrapper.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i \
@@ -257,6 +286,7 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
+          # === FIX pkg_observer.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
@@ -386,6 +416,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
+          # === FIX allowlist.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
@@ -405,6 +436,7 @@ jobs:
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
 
+          # === FIX app_profile.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
@@ -428,10 +460,10 @@ jobs:
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
+          # === STUB selinux/rules.c ===
           SELINUX_HDR="security/selinux/include/security.h"
           if [ ! -f "$SELINUX_HDR" ] || ! grep -q 'policy_mutex' "$SELINUX_HDR"; then
             echo "::warning::Legacy Samsung SELinux API detected; stubbing SukiSU selinux/rules.c"
-
             while IFS= read -r f; do
               [ -f "$f" ] || continue
               cat > "$f" <<'EOF'
@@ -454,12 +486,11 @@ jobs:
           EOF
             done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
           fi
-          grep -RIn 'apply_kernelsu_rules\|handle_sepolicy' KernelSU/kernel/selinux/rules.c drivers/kernelsu/selinux/rules.c 2>/dev/null || true
 
+          # === STUB selinux/sepolicy.c ===
           SELINUX_POLICYDB_HDR="security/selinux/ss/policydb.h"
           if [ ! -f "$SELINUX_POLICYDB_HDR" ] || ! grep -q 'compat_filename_trans_count' "$SELINUX_POLICYDB_HDR"; then
             echo "::warning::Legacy Samsung SELinux policydb detected; stubbing SukiSU selinux/sepolicy.c"
-
             while IFS= read -r f; do
               [ -f "$f" ] || continue
               cat > "$f" <<'EOF'
@@ -483,204 +514,47 @@ jobs:
               ksu_sepolicy_stub_ok();
               return old_pol;
           }
-
-          void ksu_destroy_sepolicy(struct selinux_policy *orig)
-          {
-              (void)orig;
-          }
-
-          bool ksu_type(struct policydb *db, const char *name, const char *attr)
-          {
-              (void)db;
-              (void)name;
-              (void)attr;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_attribute(struct policydb *db, const char *name)
-          {
-              (void)db;
-              (void)name;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_permissive(struct policydb *db, const char *type)
-          {
-              (void)db;
-              (void)type;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_enforce(struct policydb *db, const char *type)
-          {
-              (void)db;
-              (void)type;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_typeattribute(struct policydb *db, const char *type, const char *attr)
-          {
-              (void)db;
-              (void)type;
-              (void)attr;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_exists(struct policydb *db, const char *type)
-          {
-              (void)db;
-              (void)type;
-              return false;
-          }
-
-          bool ksu_allow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)perm;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_deny(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)perm;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_auditallow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)perm;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)perm;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_allowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)range;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_auditallowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)range;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_dontauditxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)range;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_type_transition(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def, const char *obj)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)def;
-              (void)obj;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_type_change(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)def;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_type_member(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def)
-          {
-              (void)db;
-              (void)src;
-              (void)tgt;
-              (void)cls;
-              (void)def;
-              return ksu_sepolicy_stub_ok();
-          }
-
-          bool ksu_genfscon(struct policydb *db, const char *fs_name, const char *path, const char *ctx)
-          {
-              (void)db;
-              (void)fs_name;
-              (void)path;
-              (void)ctx;
-              return ksu_sepolicy_stub_ok();
-          }
+          void ksu_destroy_sepolicy(struct selinux_policy *orig) { (void)orig; }
+          bool ksu_type(struct policydb *db, const char *name, const char *attr) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_attribute(struct policydb *db, const char *name) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_permissive(struct policydb *db, const char *type) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_enforce(struct policydb *db, const char *type) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_typeattribute(struct policydb *db, const char *type, const char *attr) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_exists(struct policydb *db, const char *type) { return false; }
+          bool ksu_allow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_deny(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_auditallow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_allowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_auditallowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_dontauditxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_type_transition(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def, const char *obj) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_type_change(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_type_member(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_genfscon(struct policydb *db, const char *fs_name, const char *path, const char *ctx) { return ksu_sepolicy_stub_ok(); }
           EOF
             done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
           fi
 
-          grep -RIn 'legacy samsung 5.4 sepolicy backend stubbed\|ksu_dup_sepolicy' \
-            KernelSU/kernel/selinux/sepolicy.c drivers/kernelsu/selinux/sepolicy.c 2>/dev/null || true
-
-          # === FIX missing linux/minmax.h for 5.4 kernel ===
+          # === FAKE minmax.h ===
           echo "::notice::Injecting missing <linux/minmax.h> for Kernel 5.4 compatibility"
           mkdir -p include/linux
-
           cat > include/linux/minmax.h <<'EOF'
           #ifndef _LINUX_MINMAX_H
           #define _LINUX_MINMAX_H
-
           #ifndef min
-          #define min(x, y) ({            \
-              typeof(x) _min1 = (x);      \
-              typeof(y) _min2 = (y);      \
-              (void) (&_min1 == &_min2);  \
-              _min1 < _min2 ? _min1 : _min2; })
+          #define min(x, y) ({ typeof(x) _min1 = (x); typeof(y) _min2 = (y); (void) (&_min1 == &_min2); _min1 < _min2 ? _min1 : _min2; })
           #endif
-
           #ifndef max
-          #define max(x, y) ({            \
-              typeof(x) _max1 = (x);      \
-              typeof(y) _max2 = (y);      \
-              (void) (&_max1 == &_max2);  \
-              _max1 > _max2 ? _max1 : _max2; })
+          #define max(x, y) ({ typeof(x) _max1 = (x); typeof(y) _max2 = (y); (void) (&_max1 == &_max2); _max1 > _max2 ? _max1 : _max2; })
           #endif
-
           #ifndef clamp
           #define clamp(val, lo, hi) min(max(val, lo), hi)
           #endif
-
           #endif
           EOF
 
-          # === FIX missing headers in dispatch.c ===
+          # === FIX dispatch.c sched headers ===
           echo "::notice::Injecting missing sched headers for dispatch.c"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
@@ -705,7 +579,6 @@ jobs:
           grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
           grep -RIn 'KSU_SECCOMP_ARCH_FALLBACK\|SECCOMP_ARCH_NATIVE_NR' KernelSU/kernel/infra/seccomp_cache.c drivers/kernelsu/infra/seccomp_cache.c 2>/dev/null || true
           grep -RIn 'handle_event\|handle_inode_event' KernelSU/kernel/manager/pkg_observer.c drivers/kernelsu/manager/pkg_observer.c 2>/dev/null || true
-          ls -l include/linux/minmax.h || true
 
       - name: Materialize SUSFS kernel-side patchset
         shell: bash
@@ -725,10 +598,6 @@ jobs:
             local rej="fs/proc/fd.c.rej"
             local target="fs/proc/fd.c"
             [ -f "$rej" ] || return 0
-            echo "::warning::Auto-fixing SUSFS reject in ${target}"
-            echo "::group::fd.c reject"
-            cat "$rej" || true
-            echo "::endgroup::"
             if ! grep -q 'susfs_fd_link' "$target"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
@@ -745,7 +614,6 @@ jobs:
           #endif
                 }' "$target"
               else
-                echo "::error::Could not locate proc_fd_link signature in ${target}"
                 return 1
               fi
             fi
@@ -757,21 +625,8 @@ jobs:
           }
 
           drop_optional_susfs_rejects() {
-            for rej in \
-              fs/exec.c.rej \
-              fs/devpts/inode.c.rej \
-              fs/namespace.c.rej \
-              fs/overlayfs/readdir.c.rej \
-              fs/proc/task_mmu.c.rej \
-              include/linux/mount.h.rej
-            do
-              if [ -f "$rej" ]; then
-                echo "::warning::Ignoring optional SUSFS reject $rej because minimal build only enables CONFIG_KSU_SUSFS"
-                echo "::group::$(basename "$rej")"
-                cat "$rej" || true
-                echo "::endgroup::"
-                rm -f "$rej"
-              fi
+            for rej in fs/exec.c.rej fs/devpts/inode.c.rej fs/namespace.c.rej fs/overlayfs/readdir.c.rej fs/proc/task_mmu.c.rej include/linux/mount.h.rej; do
+              [ -f "$rej" ] && rm -f "$rej"
             done
             return 0
           }
@@ -783,29 +638,18 @@ jobs:
             patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
             PATCH_RC=${PIPESTATUS[0]}
             set -e
-            auto_fix_fd_proc_reject || {
-              echo "::error::Auto-fix for fs/proc/fd.c reject failed"
-              exit 1
-            }
+            auto_fix_fd_proc_reject || exit 1
             drop_optional_susfs_rejects
-            REJ_LIST="$(find . -type f -name '*.rej' | tr '\n' ' ')"
             REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
             if [ "$REJ_COUNT" != "0" ]; then
-              echo "::error::SUSFS kernel patch left ${REJ_COUNT} reject file(s): ${REJ_LIST}"
-              find . -type f -name '*.rej' -print
+              echo "::error::SUSFS reject found"
               exit 1
-            fi
-            if [ "$PATCH_RC" != "0" ]; then
-              echo "::warning::patch exited with code ${PATCH_RC} but no .rej remains; continuing"
             fi
           fi
 
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
-          test -f include/linux/susfs.h || { echo "::error::include/linux/susfs.h missing"; exit 1; }
-          test -f fs/susfs.c || { echo "::error::fs/susfs.c missing"; exit 1; }
-          echo "::group::SUSFS inventory"
-          ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c
-          echo "::endgroup::"
+          test -f include/linux/susfs.h || exit 1
+          test -f fs/susfs.c || exit 1
 
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
@@ -830,6 +674,7 @@ jobs:
           enable_cfg CONFIG_KSU
           enable_cfg CONFIG_KSU_MANUAL_HOOK
           enable_cfg CONFIG_KSU_SUSFS
+          disable_cfg CONFIG_KPM
           disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
           disable_cfg CONFIG_KSU_NONE_HOOK
           disable_cfg CONFIG_KSU_DEBUG
@@ -840,31 +685,10 @@ jobs:
           disable_cfg CONFIG_SEC_RESTRICT_ROOTING
 
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
-            echo "::warning::Aggressive mode: stripping DEFEX/PROCA/RKP/TIMA"
-            for key in \
-              CONFIG_SECURITY_DEFEX \
-              CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
-              CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
-              CONFIG_SECURITY_PROCA \
-              CONFIG_PROCA \
-              CONFIG_RKP \
-              CONFIG_RKP_CFP \
-              CONFIG_RKP_NS_PROT \
-              CONFIG_RKP_KDP \
-              CONFIG_TIMA \
-              CONFIG_TIMA_RKP \
-              CONFIG_TIMA_SECBOOT \
-              CONFIG_TIMA_LKMAUTH
-            do
+            for key in CONFIG_SECURITY_DEFEX CONFIG_SECURITY_DEFEX_RESTRICT_FILE CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL CONFIG_SECURITY_PROCA CONFIG_PROCA CONFIG_RKP CONFIG_RKP_CFP CONFIG_RKP_NS_PROT CONFIG_RKP_KDP CONFIG_TIMA CONFIG_TIMA_RKP CONFIG_TIMA_SECBOOT CONFIG_TIMA_LKMAUTH; do
               disable_cfg "$key"
             done
-          else
-            echo "::notice::Minimal mode: keep DEFEX/PROCA/RKP/TIMA to prioritize boot"
           fi
-
-          echo "::group::Defconfig flags"
-          grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
-          echo "::endgroup::"
 
       - name: Build kernel
         id: build
@@ -903,30 +727,9 @@ jobs:
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" \
-              ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
-              CC="$cc_bin" LD="$ld_bin" \
-              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
-              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
-              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
-              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
-              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
-              CLANG_TRIPLE="aarch64-linux-gnu-" \
-              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-              "vendor/${DEFCONFIG}" \
-              2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
 
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
-              ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
-              CC="$cc_bin" LD="$ld_bin" \
-              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
-              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
-              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
-              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
-              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
-              CLANG_TRIPLE="aarch64-linux-gnu-" \
-              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-              2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
           if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
@@ -939,21 +742,12 @@ jobs:
           fi
 
           test -f "${OUT_DIR}/arch/arm64/boot/Image"
-          file "${OUT_DIR}/arch/arm64/boot/Image" || true
-          ccache -s || true
           EOF
 
           chmod +x "${GITHUB_WORKSPACE}/build-kernel.sh"
-
           export KERNEL_NAME="${{ github.event.inputs.kernel_name }}"
           export DEFCONFIG="${{ steps.cfg.outputs.defconfig }}"
           export OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
-
-          echo "::group::build-kernel.sh"
-          nl -ba "${GITHUB_WORKSPACE}/build-kernel.sh"
-          echo "::endgroup::"
-
-          bash -n "${GITHUB_WORKSPACE}/build-kernel.sh"
           bash "${GITHUB_WORKSPACE}/build-kernel.sh"
 
       - name: Prepare AnyKernel3 package
@@ -966,7 +760,6 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel3
 
-          # Bàn tay sắt: Ghi đè file anykernel.sh tối giản (Pure-Image)
           cat > AnyKernel3/anykernel.sh <<EOF
           properties() {
           kernel.string=${{ github.event.inputs.kernel_name }}
@@ -991,14 +784,11 @@ jobs:
           write_boot;
           EOF
 
-          # Chỉ copy duy nhất lõi Kernel Image tinh khiết
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
-
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
-            zip -r9 "../$ZIP_NAME" . \
-              -x '.git/*' '.github/*' 'README.md' '*.gitignore'
+            zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*.gitignore'
           )
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
@@ -1012,69 +802,17 @@ jobs:
             [ -f "$f" ] || continue
             ERR_LINES=$(grep -nEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "$f" | tail -n 20)
             if [ -n "$ERR_LINES" ]; then
-              echo "========================================"
               echo "🔥 TÌM THẤY LỖI TRONG FILE: $(basename "$f")"
-              echo "========================================"
               echo "$ERR_LINES"
-              
-              # Gửi annotation để hiện ra màn hình chính của GitHub Actions
-              echo "$ERR_LINES" | while IFS= read -r line; do
-                # Xóa các ký tự đặc biệt nếu có để in ra annotation sạch
-                clean_line=$(echo "$line" | sed 's/[^a-zA-Z0-9 _-:/.,()]//g')
-                echo "::error::[$(basename "$f")] $clean_line"
-              done
-            else
-              # Nếu không tìm thấy pattern lỗi quen thuộc, in ra 15 dòng cuối
-              echo "========================================"
-              echo "⚠️ KHÔNG TÌM THẤY MÃ LỖI RÕ RÀNG TRONG: $(basename "$f")"
-              echo "Dưới đây là 15 dòng cuối cùng:"
-              echo "========================================"
-              tail -n 15 "$f"
             fi
-            echo
           done
           echo "::endgroup::"
-
-          # In thẳng lỗi ra màn hình tóm tắt của Job (Summary)
           {
             echo "## ❌ Báo cáo Lỗi Biên Dịch (Smart Error Report)"
-            echo "Copy đoạn code bên dưới ném cho AI để fix:"
             echo '```text'
-            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 40 || echo "Hãy lấy 20 dòng cuối trong file log bị lỗi."
+            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 40 || echo "Lấy 20 dòng cuối trong log."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Write job summary
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          {
-            echo "## SM7325 A52s SukiSU/SUSFS build summary"
-            echo
-            echo "- kernel_branch: `${{ github.event.inputs.kernel_branch }}`"
-            echo "- region: `${{ github.event.inputs.region }}`"
-            echo "- security_mode: `${{ github.event.inputs.security_mode }}`"
-            echo "- sukisu_ref: `${{ env.SUKISU_REF }}`"
-            echo "- defconfig: `${{ steps.cfg.outputs.defconfig || 'unresolved' }}`"
-            echo "- toolchain: `${{ steps.build.outputs.toolchain || 'failed-before-build' }}`"
-            echo
-            echo "### Tail of all logs"
-            echo '```text'
-            tail -n 80 ./*.log 2>/dev/null || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Pack debug bundle
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p debug
-          cp -f ./*.log debug/ 2>/dev/null || true
-          cp -f "${{ steps.cfg.outputs.defconfig_path }}" debug/defconfig.after 2>/dev/null || true
-          cp -f AnyKernel3/anykernel.sh debug/anykernel.sh.after 2>/dev/null || true
-          find kernel -type f \( -name '*.rej' -o -name '*.orig' \) -exec cp --parents {} debug/ \; 2>/dev/null || true
 
       - name: Upload flashable AnyKernel3 zip
         if: ${{ success() }}
@@ -1082,27 +820,4 @@ jobs:
         with:
           name: ${{ steps.pack.outputs.zip_name }}
           path: ${{ github.workspace }}/${{ steps.pack.outputs.zip_name }}
-          if-no-files-found: error
-
-      - name: Upload debug logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sm7325-debug-${{ github.run_id }}
-          path: debug/
-          if-no-files-found: warn
-
-      - name: Create patched source archive
-        if: ${{ always() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          tar --exclude='.git' -caf patched-sm7325-source.tar.zst kernel
-
-      - name: Upload patched source artifact
-        if: ${{ always() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: patched-sm7325-source-${{ github.run_id }}
-          path: patched-sm7325-source.tar.zst
           if-no-files-found: error
