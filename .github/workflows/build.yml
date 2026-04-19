@@ -182,7 +182,7 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
-          # === HARD DISABLE KPM: scrub source refs + create fake header ===
+          # === HARD DISABLE KPM: scrub source refs + create fake header safely ===
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
 
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
@@ -194,23 +194,37 @@ jobs:
 
           while IFS= read -r f; do
             [ -f "$f" ] || continue
-            sed -i '/#include "kpm\/kpm.h"/d' "$f"
+            # Xóa triệt để mọi dòng #include có chứa kpm/kpm.h (xóa cả ngoặc nhọn < >)
+            sed -i '/kpm\/kpm\.h/d' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'kpm/kpm.h' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          mkdir -p KernelSU/kernel/kpm drivers/kernelsu/kpm
-          cat > KernelSU/kernel/kpm/kpm.h <<'EOF'
+          # Khắc phục lỗi symlink bằng cách dùng realpath
+          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
+          [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
+          mkdir -p "${KSU_REAL_DIR}/kpm"
+
+          cat > "${KSU_REAL_DIR}/kpm/kpm.h" <<'EOF'
           #ifndef __SUKISU_KPM_H
           #define __SUKISU_KPM_H
+
           #include <linux/types.h>
           #include <linux/ioctl.h>
+          #include <linux/errno.h>
+
           #define CMD_KPM_CONTROL 1
           #define CMD_KPM_CONTROL_MAX 10
-          static inline int kpm_disabled_stub(void) { return -EOPNOTSUPP; }
+
+          static inline int kpm_disabled_stub(void)
+          {
+              return -EOPNOTSUPP;
+          }
+
           #endif
           EOF
-          cp -f KernelSU/kernel/kpm/kpm.h drivers/kernelsu/kpm/kpm.h
 
           echo "::group::KPM scrub result"
+          echo "drivers/kernelsu -> ${KSU_REAL_DIR}"
+          ls -l "${KSU_REAL_DIR}/kpm/kpm.h" || true
           grep -RIn 'kpm/kpm.h\|CMD_KPM_CONTROL\|Enable SukiSU KPM' KernelSU drivers/kernelsu 2>/dev/null || true
           echo "::endgroup::"
 
@@ -575,10 +589,43 @@ jobs:
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
 
+          # === FIX supercall.c task_work / TWA_RESUME for old 5.4 ===
+          echo "::notice::Injecting task_work compat for supercall.c"
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          s = p.read_text()
+
+          headers = [
+              '#include <linux/task_work.h>',
+              '#include <linux/sched/task.h>',
+          ]
+          for h in reversed(headers):
+              if h not in s:
+                  s = h + '\n' + s
+
+          if '#ifndef TWA_RESUME' not in s:
+              s = '#ifndef TWA_RESUME\n#define TWA_RESUME true\n#endif\n' + s
+
+          s = re.sub(
+              r'task_work_add\s*\(([^,]+),\s*([^,]+),\s*TWA_RESUME\)',
+              r'task_work_add(\1, \2, true)',
+              s
+          )
+
+          p.write_text(s)
+          PY
+          done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/supercall.c' -type f 2>/dev/null)
+
           echo ">> compat result"
           grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
           grep -RIn 'KSU_SECCOMP_ARCH_FALLBACK\|SECCOMP_ARCH_NATIVE_NR' KernelSU/kernel/infra/seccomp_cache.c drivers/kernelsu/infra/seccomp_cache.c 2>/dev/null || true
           grep -RIn 'handle_event\|handle_inode_event' KernelSU/kernel/manager/pkg_observer.c drivers/kernelsu/manager/pkg_observer.c 2>/dev/null || true
+          ls -l include/linux/minmax.h || true
 
       - name: Materialize SUSFS kernel-side patchset
         shell: bash
@@ -598,6 +645,10 @@ jobs:
             local rej="fs/proc/fd.c.rej"
             local target="fs/proc/fd.c"
             [ -f "$rej" ] || return 0
+            echo "::warning::Auto-fixing SUSFS reject in ${target}"
+            echo "::group::fd.c reject"
+            cat "$rej" || true
+            echo "::endgroup::"
             if ! grep -q 'susfs_fd_link' "$target"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
@@ -614,6 +665,7 @@ jobs:
           #endif
                 }' "$target"
               else
+                echo "::error::Could not locate proc_fd_link signature in ${target}"
                 return 1
               fi
             fi
@@ -625,8 +677,21 @@ jobs:
           }
 
           drop_optional_susfs_rejects() {
-            for rej in fs/exec.c.rej fs/devpts/inode.c.rej fs/namespace.c.rej fs/overlayfs/readdir.c.rej fs/proc/task_mmu.c.rej include/linux/mount.h.rej; do
-              [ -f "$rej" ] && rm -f "$rej"
+            for rej in \
+              fs/exec.c.rej \
+              fs/devpts/inode.c.rej \
+              fs/namespace.c.rej \
+              fs/overlayfs/readdir.c.rej \
+              fs/proc/task_mmu.c.rej \
+              include/linux/mount.h.rej
+            do
+              if [ -f "$rej" ]; then
+                echo "::warning::Ignoring optional SUSFS reject $rej because minimal build only enables CONFIG_KSU_SUSFS"
+                echo "::group::$(basename "$rej")"
+                cat "$rej" || true
+                echo "::endgroup::"
+                rm -f "$rej"
+              fi
             done
             return 0
           }
@@ -638,18 +703,29 @@ jobs:
             patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
             PATCH_RC=${PIPESTATUS[0]}
             set -e
-            auto_fix_fd_proc_reject || exit 1
+            auto_fix_fd_proc_reject || {
+              echo "::error::Auto-fix for fs/proc/fd.c reject failed"
+              exit 1
+            }
             drop_optional_susfs_rejects
+            REJ_LIST="$(find . -type f -name '*.rej' | tr '\n' ' ')"
             REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
             if [ "$REJ_COUNT" != "0" ]; then
-              echo "::error::SUSFS reject found"
+              echo "::error::SUSFS kernel patch left ${REJ_COUNT} reject file(s): ${REJ_LIST}"
+              find . -type f -name '*.rej' -print
               exit 1
+            fi
+            if [ "$PATCH_RC" != "0" ]; then
+              echo "::warning::patch exited with code ${PATCH_RC} but no .rej remains; continuing"
             fi
           fi
 
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
-          test -f include/linux/susfs.h || exit 1
-          test -f fs/susfs.c || exit 1
+          test -f include/linux/susfs.h || { echo "::error::include/linux/susfs.h missing"; exit 1; }
+          test -f fs/susfs.c || { echo "::error::fs/susfs.c missing"; exit 1; }
+          echo "::group::SUSFS inventory"
+          ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c
+          echo "::endgroup::"
 
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
@@ -672,7 +748,7 @@ jobs:
           }
 
           enable_cfg CONFIG_KSU
-          enable_cfg CONFIG_KSU_MANUAL_HOOK
+          enable_cfg CONFIG_KSU_MANUAL_SU
           enable_cfg CONFIG_KSU_SUSFS
           disable_cfg CONFIG_KPM
           disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
@@ -685,10 +761,31 @@ jobs:
           disable_cfg CONFIG_SEC_RESTRICT_ROOTING
 
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
-            for key in CONFIG_SECURITY_DEFEX CONFIG_SECURITY_DEFEX_RESTRICT_FILE CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL CONFIG_SECURITY_PROCA CONFIG_PROCA CONFIG_RKP CONFIG_RKP_CFP CONFIG_RKP_NS_PROT CONFIG_RKP_KDP CONFIG_TIMA CONFIG_TIMA_RKP CONFIG_TIMA_SECBOOT CONFIG_TIMA_LKMAUTH; do
+            echo "::warning::Aggressive mode: stripping DEFEX/PROCA/RKP/TIMA"
+            for key in \
+              CONFIG_SECURITY_DEFEX \
+              CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
+              CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
+              CONFIG_SECURITY_PROCA \
+              CONFIG_PROCA \
+              CONFIG_RKP \
+              CONFIG_RKP_CFP \
+              CONFIG_RKP_NS_PROT \
+              CONFIG_RKP_KDP \
+              CONFIG_TIMA \
+              CONFIG_TIMA_RKP \
+              CONFIG_TIMA_SECBOOT \
+              CONFIG_TIMA_LKMAUTH
+            do
               disable_cfg "$key"
             done
+          else
+            echo "::notice::Minimal mode: keep DEFEX/PROCA/RKP/TIMA to prioritize boot"
           fi
+
+          echo "::group::Defconfig flags"
+          grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
+          echo "::endgroup::"
 
       - name: Build kernel
         id: build
@@ -727,9 +824,30 @@ jobs:
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" \
+              ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
+              CC="$cc_bin" LD="$ld_bin" \
+              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
+              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
+              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
+              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
+              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
+              CLANG_TRIPLE="aarch64-linux-gnu-" \
+              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+              "vendor/${DEFCONFIG}" \
+              2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
 
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
+              ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
+              CC="$cc_bin" LD="$ld_bin" \
+              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
+              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
+              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
+              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
+              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
+              CLANG_TRIPLE="aarch64-linux-gnu-" \
+              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+              2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
           if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
@@ -742,12 +860,21 @@ jobs:
           fi
 
           test -f "${OUT_DIR}/arch/arm64/boot/Image"
+          file "${OUT_DIR}/arch/arm64/boot/Image" || true
+          ccache -s || true
           EOF
 
           chmod +x "${GITHUB_WORKSPACE}/build-kernel.sh"
+
           export KERNEL_NAME="${{ github.event.inputs.kernel_name }}"
           export DEFCONFIG="${{ steps.cfg.outputs.defconfig }}"
           export OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
+
+          echo "::group::build-kernel.sh"
+          nl -ba "${GITHUB_WORKSPACE}/build-kernel.sh"
+          echo "::endgroup::"
+
+          bash -n "${GITHUB_WORKSPACE}/build-kernel.sh"
           bash "${GITHUB_WORKSPACE}/build-kernel.sh"
 
       - name: Prepare AnyKernel3 package
@@ -760,8 +887,11 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel3
 
-          cat > AnyKernel3/anykernel.sh <<EOF
-          properties() {
+          cat > AnyKernel3/anykernel.sh <<'EOF'
+          ## AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          properties() { '
           kernel.string=${{ github.event.inputs.kernel_name }}
           do.devicecheck=0
           do.modules=0
@@ -773,22 +903,28 @@ jobs:
           device.name3=a52sxqks
           supported.versions=
           supported.patchlevels=
-          }
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=0;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
+          supported.vendorpatchlevels=
+          '; } # end properties
+
+          BLOCK=/dev/block/bootdevice/by-name/boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
 
           . tools/ak3-core.sh;
-          dump_boot;
-          write_boot;
+
+          split_boot;
+          flash_boot;
           EOF
 
+          # Chỉ copy duy nhất lõi Kernel Image tinh khiết
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
+
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
-            zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*.gitignore'
+            zip -r9 "../$ZIP_NAME" . \
+              -x '.git/*' '.github/*' 'README.md' '*.gitignore'
           )
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
@@ -802,17 +938,69 @@ jobs:
             [ -f "$f" ] || continue
             ERR_LINES=$(grep -nEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "$f" | tail -n 20)
             if [ -n "$ERR_LINES" ]; then
+              echo "========================================"
               echo "🔥 TÌM THẤY LỖI TRONG FILE: $(basename "$f")"
+              echo "========================================"
               echo "$ERR_LINES"
+              
+              # Gửi annotation để hiện ra màn hình chính của GitHub Actions
+              echo "$ERR_LINES" | while IFS= read -r line; do
+                # Xóa các ký tự đặc biệt nếu có để in ra annotation sạch
+                clean_line=$(echo "$line" | sed 's/[^a-zA-Z0-9 _-:/.,()]//g')
+                echo "::error::[$(basename "$f")] $clean_line"
+              done
+            else
+              # Nếu không tìm thấy pattern lỗi quen thuộc, in ra 15 dòng cuối
+              echo "========================================"
+              echo "⚠️ KHÔNG TÌM THẤY MÃ LỖI RÕ RÀNG TRONG: $(basename "$f")"
+              echo "Dưới đây là 15 dòng cuối cùng:"
+              echo "========================================"
+              tail -n 15 "$f"
             fi
+            echo
           done
           echo "::endgroup::"
+
+          # In thẳng lỗi ra màn hình tóm tắt của Job (Summary)
           {
             echo "## ❌ Báo cáo Lỗi Biên Dịch (Smart Error Report)"
+            echo "Copy đoạn code bên dưới ném cho AI để fix:"
             echo '```text'
-            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 40 || echo "Lấy 20 dòng cuối trong log."
+            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 40 || echo "Hãy lấy 20 dòng cuối trong file log bị lỗi."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          {
+            echo "## SM7325 A52s SukiSU/SUSFS build summary"
+            echo
+            echo "- kernel_branch: `${{ github.event.inputs.kernel_branch }}`"
+            echo "- region: `${{ github.event.inputs.region }}`"
+            echo "- security_mode: `${{ github.event.inputs.security_mode }}`"
+            echo "- sukisu_ref: `${{ env.SUKISU_REF }}`"
+            echo "- defconfig: `${{ steps.cfg.outputs.defconfig || 'unresolved' }}`"
+            echo "- toolchain: `${{ steps.build.outputs.toolchain || 'failed-before-build' }}`"
+            echo
+            echo "### Tail of all logs"
+            echo '```text'
+            tail -n 80 ./*.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Pack debug bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p debug
+          cp -f ./*.log debug/ 2>/dev/null || true
+          cp -f "${{ steps.cfg.outputs.defconfig_path }}" debug/defconfig.after 2>/dev/null || true
+          cp -f AnyKernel3/anykernel.sh debug/anykernel.sh.after 2>/dev/null || true
+          find kernel -type f \( -name '*.rej' -o -name '*.orig' \) -exec cp --parents {} debug/ \; 2>/dev/null || true
 
       - name: Upload flashable AnyKernel3 zip
         if: ${{ success() }}
@@ -820,4 +1008,27 @@ jobs:
         with:
           name: ${{ steps.pack.outputs.zip_name }}
           path: ${{ github.workspace }}/${{ steps.pack.outputs.zip_name }}
+          if-no-files-found: error
+
+      - name: Upload debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sm7325-debug-${{ github.run_id }}
+          path: debug/
+          if-no-files-found: warn
+
+      - name: Create patched source archive
+        if: ${{ always() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tar --exclude='.git' -caf patched-sm7325-source.tar.zst kernel
+
+      - name: Upload patched source artifact
+        if: ${{ always() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-sm7325-source-${{ github.run_id }}
+          path: patched-sm7325-source.tar.zst
           if-no-files-found: error
