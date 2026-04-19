@@ -649,10 +649,42 @@ jobs:
           grep -RIn 'legacy samsung 5.4 sepolicy backend stubbed\|ksu_dup_sepolicy' \
             KernelSU/kernel/selinux/sepolicy.c drivers/kernelsu/selinux/sepolicy.c 2>/dev/null || true
 
+          # === FIX missing linux/minmax.h for 5.4 kernel ===
+          echo "::notice::Injecting missing <linux/minmax.h> for Kernel 5.4 compatibility"
+          mkdir -p include/linux
+
+          cat > include/linux/minmax.h <<'EOF'
+          #ifndef _LINUX_MINMAX_H
+          #define _LINUX_MINMAX_H
+
+          #ifndef min
+          #define min(x, y) ({            \
+              typeof(x) _min1 = (x);      \
+              typeof(y) _min2 = (y);      \
+              (void) (&_min1 == &_min2);  \
+              _min1 < _min2 ? _min1 : _min2; })
+          #endif
+
+          #ifndef max
+          #define max(x, y) ({            \
+              typeof(x) _max1 = (x);      \
+              typeof(y) _max2 = (y);      \
+              (void) (&_max1 == &_max2);  \
+              _max1 > _max2 ? _max1 : _max2; })
+          #endif
+
+          #ifndef clamp
+          #define clamp(val, lo, hi) min(max(val, lo), hi)
+          #endif
+
+          #endif
+          EOF
+
           echo ">> compat result"
           grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
           grep -RIn 'KSU_SECCOMP_ARCH_FALLBACK\|SECCOMP_ARCH_NATIVE_NR' KernelSU/kernel/infra/seccomp_cache.c drivers/kernelsu/infra/seccomp_cache.c 2>/dev/null || true
           grep -RIn 'handle_event\|handle_inode_event' KernelSU/kernel/manager/pkg_observer.c drivers/kernelsu/manager/pkg_observer.c 2>/dev/null || true
+          ls -l include/linux/minmax.h || true
 
       - name: Materialize SUSFS kernel-side patchset
         shell: bash
