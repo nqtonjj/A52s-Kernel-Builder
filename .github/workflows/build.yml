@@ -622,50 +622,44 @@ jobs:
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/supercall.c' -type f 2>/dev/null)
 
           # === FIX link-time unresolved KSU/manual-hook symbols on Samsung 5.4 ===
-          echo "::notice::Injecting legacy symbol stubs for unresolved KSU/manual-hook symbols"
-          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
-          [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
+          echo "::notice::Force-linking legacy manual-hook symbols directly inside supercall.c"
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY'
+          from pathlib import Path
+          import sys
 
-          cat > "${KSU_REAL_DIR}/legacy_symbol_stubs.c" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          #include <linux/kernel.h>
-          #include <linux/errno.h>
-          #include <linux/compiler.h>
+          p = Path(sys.argv[1])
+          s = p.read_text()
 
-          /*
-           * Boot-safe baseline for legacy Samsung 5.4:
-           * resolve manual-hook / mount-path symbols that SukiSU expects
-           * but this tree does not currently provide.
-           * Replace with real backports later.
-           */
+          marker = '/* KSU_LEGACY_FORCE_LINK_STUBS */'
+          if marker not in s:
+              s += r"""
 
-          __weak long ksu_vfs_read_hook(void) { return 0; }
-          __weak long ksu_handle_sys_read(void) { return 0; }
-          __weak long ksu_execveat_hook(void) { return 0; }
-          __weak long ksu_handle_execveat_sucompat(void) { return 0; }
-          __weak long ksu_handle_execveat(void) { return 0; }
-          __weak long ksu_handle_devpts(void) { return 0; }
-          __weak long ksu_input_hook(void) { return 0; }
+          /* KSU_LEGACY_FORCE_LINK_STUBS */
+          __attribute__((weak)) long ksu_vfs_read_hook(void) { return 0; }
+          __attribute__((weak)) long ksu_handle_sys_read(void) { return 0; }
+          __attribute__((weak)) long ksu_execveat_hook(void) { return 0; }
+          __attribute__((weak)) long ksu_handle_execveat_sucompat(void) { return 0; }
+          __attribute__((weak)) long ksu_handle_execveat(void) { return 0; }
+          __attribute__((weak)) long ksu_handle_devpts(void) { return 0; }
+          __attribute__((weak)) long ksu_input_hook(void) { return 0; }
+          __attribute__((weak)) long path_umount(void) { return -38; }
+          __attribute__((weak)) long path_mount(void) { return -38; }
+          """
+              p.write_text(s)
+          PY
+          done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/supercall.c' -type f 2>/dev/null)
 
-          __weak long path_mount(void) { return -ENOSYS; }
-          __weak long path_umount(void) { return -ENOSYS; }
-          EOF
-
-          grep -q 'legacy_symbol_stubs.o' "${KSU_REAL_DIR}/Makefile" || \
-            printf '\nobj-y += legacy_symbol_stubs.o\n' >> "${KSU_REAL_DIR}/Makefile"
-
-          echo "::group::legacy-symbol-stubs"
-          ls -l "${KSU_REAL_DIR}/legacy_symbol_stubs.c" || true
-          grep -n 'legacy_symbol_stubs.o' "${KSU_REAL_DIR}/Makefile" || true
-          sed -n '1,220p' "${KSU_REAL_DIR}/legacy_symbol_stubs.c" || true
+          echo "::group::force-link-supercall-stubs"
+          grep -RIn 'KSU_LEGACY_FORCE_LINK_STUBS\|ksu_vfs_read_hook\|ksu_handle_execveat\|path_mount\|path_umount' \
+            KernelSU/kernel/supercall/supercall.c drivers/kernelsu/supercall/supercall.c 2>/dev/null || true
           echo "::endgroup::"
 
           echo ">> compat result"
           grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
           grep -RIn 'KSU_SECCOMP_ARCH_FALLBACK\|SECCOMP_ARCH_NATIVE_NR' KernelSU/kernel/infra/seccomp_cache.c drivers/kernelsu/infra/seccomp_cache.c 2>/dev/null || true
           grep -RIn 'handle_event\|handle_inode_event' KernelSU/kernel/manager/pkg_observer.c drivers/kernelsu/manager/pkg_observer.c 2>/dev/null || true
-          grep -RIn 'ksu_vfs_read_hook\|ksu_handle_execveat\|path_mount\|path_umount' "${KSU_REAL_DIR}/legacy_symbol_stubs.c" 2>/dev/null || true
-          ls -l include/linux/minmax.h || true
 
       - name: Materialize SUSFS kernel-side patchset
         shell: bash
