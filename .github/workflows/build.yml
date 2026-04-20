@@ -28,6 +28,20 @@ on:
         options:
           - minimal
           - aggressive
+      feature_profile:
+        description: "Boot triage profile (Khoanh vùng lỗi boot)"
+        required: true
+        type: choice
+        default: "baseline_noroot"
+        options:
+          - baseline_noroot
+          - ksu_nosusfs
+          - full
+      touch_defex_stub:
+        description: "Bật vá lỗi liệt cảm ứng DEFEX (Chỉ dùng khi đã boot vào được màn hình chính)"
+        required: true
+        type: boolean
+        default: false
       upload_patched_source:
         description: "Upload patched source tarball"
         required: true
@@ -182,51 +196,32 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
-          # === HARD DISABLE KPM: scrub source refs + create fake header safely ===
+          # === HARD DISABLE KPM ===
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
-
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
           done
           for f in KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig; do
             [ -f "$f" ] && sed -i '/kpm\/Kconfig/d' "$f" || true
           done
-
           while IFS= read -r f; do
             [ -f "$f" ] || continue
-            # Xóa triệt để mọi dòng #include có chứa kpm/kpm.h (xóa cả ngoặc nhọn < >)
             sed -i '/kpm\/kpm\.h/d' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'kpm/kpm.h' KernelSU drivers/kernelsu 2>/dev/null || true)
-
-          # Khắc phục lỗi symlink bằng cách dùng realpath
           KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
           [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
           mkdir -p "${KSU_REAL_DIR}/kpm"
-
           cat > "${KSU_REAL_DIR}/kpm/kpm.h" <<'EOF'
           #ifndef __SUKISU_KPM_H
           #define __SUKISU_KPM_H
-
           #include <linux/types.h>
           #include <linux/ioctl.h>
           #include <linux/errno.h>
-
           #define CMD_KPM_CONTROL 1
           #define CMD_KPM_CONTROL_MAX 10
-
-          static inline int kpm_disabled_stub(void)
-          {
-              return -EOPNOTSUPP;
-          }
-
+          static inline int kpm_disabled_stub(void) { return -EOPNOTSUPP; }
           #endif
           EOF
-
-          echo "::group::KPM scrub result"
-          echo "drivers/kernelsu -> ${KSU_REAL_DIR}"
-          ls -l "${KSU_REAL_DIR}/kpm/kpm.h" || true
-          grep -RIn 'kpm/kpm.h\|CMD_KPM_CONTROL\|Enable SukiSU KPM' KernelSU drivers/kernelsu 2>/dev/null || true
-          echo "::endgroup::"
 
           # === FIX pgtable.h ===
           while IFS= read -r f; do
@@ -255,7 +250,6 @@ jobs:
           static inline void perf_log_printk(const char *fmt, ...) {}
           #endif
           EOF
-
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i 's|<log/perflog.h>|<linux/log/perflog.h>|g' "$f"
@@ -300,255 +294,65 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          # === FIX pkg_observer.c ===
+          # === FIX pkg_observer.c (STUB) ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
-          #include <linux/version.h>
-          #include <linux/fsnotify_backend.h>
-          #include <linux/namei.h>
-          #include <linux/path.h>
-          #include <linux/slab.h>
-          #include <linux/string.h>
-          #include <linux/fs.h>
-          #include "klog.h"
-          #include "manager/throne_tracker.h"
-
-          #define MASK_SYSTEM (FS_CREATE | FS_MOVE | FS_EVENT_ON_CHILD)
-
-          struct watch_dir {
-              const char *path;
-              u32 mask;
-              struct path kpath;
-              struct inode *inode;
-              struct fsnotify_mark *mark;
-          };
-
-          static struct fsnotify_group *g;
-
-          static int ksu_handle_event(struct fsnotify_group *group,
-                                      struct inode *inode,
-                                      u32 mask,
-                                      const void *data,
-                                      int data_type,
-                                      const struct qstr *file_name,
-                                      u32 cookie,
-                                      struct fsnotify_iter_info *iter_info)
-          {
-              if (!file_name)
-                  return 0;
-              if (mask & FS_ISDIR)
-                  return 0;
-              if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {
-                  pr_info("packages.list detected: %u\n", mask);
-                  track_throne(false);
-              }
-              return 0;
-          }
-
-          static const struct fsnotify_ops ksu_ops = {
-              .handle_event = ksu_handle_event,
-          };
-
-          static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
-          {
-              struct fsnotify_mark *m;
-              m = kzalloc(sizeof(*m), GFP_KERNEL);
-              if (!m)
-                  return -ENOMEM;
-              fsnotify_init_mark(m, g);
-              m->mask = mask;
-              if (fsnotify_add_inode_mark(m, inode, 0)) {
-                  fsnotify_put_mark(m);
-                  return -EINVAL;
-              }
-              *out = m;
-              return 0;
-          }
-
-          static int watch_one_dir(struct watch_dir *wd)
-          {
-              int ret = kern_path(wd->path, LOOKUP_FOLLOW, &wd->kpath);
-              if (ret) {
-                  pr_info("path not ready: %s (%d)\n", wd->path, ret);
-                  return ret;
-              }
-              wd->inode = d_inode(wd->kpath.dentry);
-              ihold(wd->inode);
-              ret = add_mark_on_inode(wd->inode, wd->mask, &wd->mark);
-              if (ret) {
-                  pr_err("Add mark failed for %s (%d)\n", wd->path, ret);
-                  path_put(&wd->kpath);
-                  iput(wd->inode);
-                  wd->inode = NULL;
-                  return ret;
-              }
-              pr_info("watching %s\n", wd->path);
-              return ret;
-          }
-
-          static void unwatch_one_dir(struct watch_dir *wd)
-          {
-              if (wd->mark) {
-                  fsnotify_destroy_mark(wd->mark, g);
-                  fsnotify_put_mark(wd->mark);
-                  wd->mark = NULL;
-              }
-              if (wd->inode) {
-                  iput(wd->inode);
-                  wd->inode = NULL;
-              }
-              if (wd->kpath.dentry) {
-                  path_put(&wd->kpath);
-                  memset(&wd->kpath, 0, sizeof(wd->kpath));
-              }
-          }
-
-          static struct watch_dir g_watch = {
-              .path = "/data/system",
-              .mask = MASK_SYSTEM,
-          };
-
-          int ksu_observer_init(void)
-          {
-              int ret = 0;
-              g = fsnotify_alloc_group(&ksu_ops);
-              if (IS_ERR(g))
-                  return PTR_ERR(g);
-              ret = watch_one_dir(&g_watch);
-              pr_info("observer init done\n");
-              return ret;
-          }
-
-          void __exit ksu_observer_exit(void)
-          {
-              unwatch_one_dir(&g_watch);
-              fsnotify_put_group(g);
-              pr_info("observer exit done\n");
-          }
+          int ksu_observer_init(void) { return 0; }
+          void ksu_observer_exit(void) {}
+          int ksu_fsnotify_init(void) { return 0; }
+          void ksu_fsnotify_exit(void) {}
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          # === FIX allowlist.c ===
+          # === FIX app_profile.c (STUB) ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
-            python3 - "$f" <<'PY'
-          import re
-          from pathlib import Path
-          import sys
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          if '#include <linux/task_work.h>' not in s:
-              s = '#include <linux/task_work.h>\n' + s
-          if '#include <linux/sched/task.h>' not in s:
-              s = '#include <linux/sched/task.h>\n' + s
-          if '#ifndef TWA_RESUME' not in s:
-              s = '#ifndef TWA_RESUME\n#define TWA_RESUME true\n#endif\n' + s
-          s = re.sub(r'task_work_add\s*\(([^,]+),\s*([^,]+),\s*TWA_RESUME\)', r'task_work_add(\1, \2, true)', s)
-          p.write_text(s)
-          PY
-          done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
-
-          # === FIX app_profile.c ===
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            python3 - "$f" <<'PY'
-          import re
-          from pathlib import Path
-          import sys
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          if '#include <linux/seccomp.h>' not in s:
-              s = '#include <linux/seccomp.h>\n' + s
-          if '#include <linux/sched/task.h>' not in s:
-              s = '#include <linux/sched/task.h>\n' + s
-          s = re.sub(r'^\s*void\s+seccomp_filter_release\s*\([^\n]*\);\s*\n?', '', s, flags=re.M)
-          s = re.sub(
-              r'static\s+void\s+disable_seccomp\s*\(\s*void\s*\)\s*\{[\s\S]*?\n\}',
-              'static void disable_seccomp(void)\n{\n\t/* samsung 5.4 stub: old seccomp layout, skip disable_seccomp path */\n}\n',
-              s,
-              count=1,
-          )
-          p.write_text(s)
-          PY
+            cat > "$f" <<'EOF'
+          // SPDX-License-Identifier: GPL-2.0
+          int ksu_app_profile_init(void) { return 0; }
+          void ksu_app_profile_exit(void) {}
+          EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
           # === STUB selinux/rules.c ===
-          SELINUX_HDR="security/selinux/include/security.h"
-          if [ ! -f "$SELINUX_HDR" ] || ! grep -q 'policy_mutex' "$SELINUX_HDR"; then
-            echo "::warning::Legacy Samsung SELinux API detected; stubbing SukiSU selinux/rules.c"
-            while IFS= read -r f; do
-              [ -f "$f" ] || continue
-              cat > "$f" <<'EOF'
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
-          #include <linux/types.h>
-          #include <linux/errno.h>
-          #include <linux/uaccess.h>
-          #include <linux/printk.h>
-
-          void apply_kernelsu_rules(void)
-          {
-              pr_warn("ksu: legacy samsung 5.4 selinux API detected, apply_kernelsu_rules() stubbed\n");
-          }
-
-          int handle_sepolicy(void __user *user_data, u64 data_len)
-          {
-              pr_warn("ksu: legacy samsung 5.4 selinux API detected, handle_sepolicy() stubbed\n");
-              return 0;
-          }
+          int ksu_rules_init(void) { return 0; }
+          void ksu_rules_exit(void) {}
           EOF
-            done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
-          fi
+          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
 
           # === STUB selinux/sepolicy.c ===
-          SELINUX_POLICYDB_HDR="security/selinux/ss/policydb.h"
-          if [ ! -f "$SELINUX_POLICYDB_HDR" ] || ! grep -q 'compat_filename_trans_count' "$SELINUX_POLICYDB_HDR"; then
-            echo "::warning::Legacy Samsung SELinux policydb detected; stubbing SukiSU selinux/sepolicy.c"
-            while IFS= read -r f; do
-              [ -f "$f" ] || continue
-              cat > "$f" <<'EOF'
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
-          #include <linux/types.h>
-          #include <linux/printk.h>
           #include "sepolicy.h"
-
-          static bool ksu_sepolicy_stub_ok(void)
-          {
-              static bool warned;
-              if (!warned) {
-                  pr_warn("ksu: legacy samsung 5.4 sepolicy backend stubbed\n");
-                  warned = true;
-              }
-              return true;
-          }
-
-          struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol)
-          {
-              ksu_sepolicy_stub_ok();
-              return old_pol;
-          }
+          struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol) { return old_pol; }
           void ksu_destroy_sepolicy(struct selinux_policy *orig) { (void)orig; }
-          bool ksu_type(struct policydb *db, const char *name, const char *attr) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_attribute(struct policydb *db, const char *name) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_permissive(struct policydb *db, const char *type) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_enforce(struct policydb *db, const char *type) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_typeattribute(struct policydb *db, const char *type, const char *attr) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_type(struct policydb *db, const char *name, const char *attr) { return true; }
+          bool ksu_attribute(struct policydb *db, const char *name) { return true; }
+          bool ksu_permissive(struct policydb *db, const char *type) { return true; }
+          bool ksu_enforce(struct policydb *db, const char *type) { return true; }
+          bool ksu_typeattribute(struct policydb *db, const char *type, const char *attr) { return true; }
           bool ksu_exists(struct policydb *db, const char *type) { return false; }
-          bool ksu_allow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_deny(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_auditallow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_allowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_auditallowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_dontauditxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_type_transition(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def, const char *obj) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_type_change(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_type_member(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return ksu_sepolicy_stub_ok(); }
-          bool ksu_genfscon(struct policydb *db, const char *fs_name, const char *path, const char *ctx) { return ksu_sepolicy_stub_ok(); }
+          bool ksu_allow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
+          bool ksu_deny(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
+          bool ksu_auditallow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
+          bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
+          bool ksu_allowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
+          bool ksu_auditallowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
+          bool ksu_dontauditxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
+          bool ksu_type_transition(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def, const char *obj) { return true; }
+          bool ksu_type_change(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return true; }
+          bool ksu_type_member(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return true; }
+          bool ksu_genfscon(struct policydb *db, const char *fs_name, const char *path, const char *ctx) { return true; }
           EOF
-            done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
-          fi
+          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
 
           # === FAKE minmax.h ===
           echo "::notice::Injecting missing <linux/minmax.h> for Kernel 5.4 compatibility"
@@ -568,59 +372,6 @@ jobs:
           #endif
           EOF
 
-          # === FIX dispatch.c sched headers ===
-          echo "::notice::Injecting missing sched headers for dispatch.c"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            python3 - "$f" <<'PY'
-          import sys
-          from pathlib import Path
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          headers = [
-              '#include <linux/sched.h>',
-              '#include <linux/sched/signal.h>',
-              '#include <linux/sched/task.h>'
-          ]
-          for h in reversed(headers):
-              if h not in s:
-                  s = h + '\n' + s
-          p.write_text(s)
-          PY
-          done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
-
-          # === FIX supercall.c task_work / TWA_RESUME for old 5.4 ===
-          echo "::notice::Injecting task_work compat for supercall.c"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            python3 - "$f" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-          p = Path(sys.argv[1])
-          s = p.read_text()
-
-          headers = [
-              '#include <linux/task_work.h>',
-              '#include <linux/sched/task.h>',
-          ]
-          for h in reversed(headers):
-              if h not in s:
-                  s = h + '\n' + s
-
-          if '#ifndef TWA_RESUME' not in s:
-              s = '#ifndef TWA_RESUME\n#define TWA_RESUME true\n#endif\n' + s
-
-          s = re.sub(
-              r'task_work_add\s*\(([^,]+),\s*([^,]+),\s*TWA_RESUME\)',
-              r'task_work_add(\1, \2, true)',
-              s
-          )
-
-          p.write_text(s)
-          PY
-          done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/supercall.c' -type f 2>/dev/null)
-
           # === FIX link-time unresolved KSU/manual-hook symbols on Samsung 5.4 ===
           echo "::notice::Force-linking legacy manual-hook symbols directly inside supercall.c"
           while IFS= read -r f; do
@@ -628,14 +379,11 @@ jobs:
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-
           p = Path(sys.argv[1])
           s = p.read_text()
-
           marker = '/* KSU_LEGACY_FORCE_LINK_STUBS */'
           if marker not in s:
               s += r"""
-
           /* KSU_LEGACY_FORCE_LINK_STUBS */
           __attribute__((weak)) long ksu_vfs_read_hook(void) { return 0; }
           __attribute__((weak)) long ksu_handle_sys_read(void) { return 0; }
@@ -651,17 +399,34 @@ jobs:
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/supercall.c' -type f 2>/dev/null)
 
-          echo "::group::force-link-supercall-stubs"
-          grep -RIn 'KSU_LEGACY_FORCE_LINK_STUBS\|ksu_vfs_read_hook\|ksu_handle_execveat\|path_mount\|path_umount' \
-            KernelSU/kernel/supercall/supercall.c drivers/kernelsu/supercall/supercall.c 2>/dev/null || true
+      - name: Apply optional guarded touchscreen DEFEX stub
+        if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/04c-touch-defex-stub.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+
+          echo "::notice::Applying guarded DEFEX stub only to touchscreen driver call-sites"
+          find drivers/input/touchscreen -type f -name '*.c' 2>/dev/null \
+            | while IFS= read -r f; do
+                grep -qE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' "$f" || continue
+                sed -i \
+                  -e 's/task_defex_syscall_catch([^;)]*)/0/g' \
+                  -e 's/defex_check([^;)]*)/0/g' \
+                  -e 's/five_check([^;)]*)/0/g' \
+                  -e 's/defex_allow([^;)]*)/0/g' \
+                  "$f"
+                echo "stubbed: $f"
+              done
+
+          echo "::group::touch-defex-stub-result"
+          grep -RInE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' drivers/input/touchscreen 2>/dev/null || true
           echo "::endgroup::"
 
-          echo ">> compat result"
-          grep -RIn 'security_inode_init_security' KernelSU/kernel/infra/file_wrapper.c drivers/kernelsu/infra/file_wrapper.c 2>/dev/null || true
-          grep -RIn 'KSU_SECCOMP_ARCH_FALLBACK\|SECCOMP_ARCH_NATIVE_NR' KernelSU/kernel/infra/seccomp_cache.c drivers/kernelsu/infra/seccomp_cache.c 2>/dev/null || true
-          grep -RIn 'handle_event\|handle_inode_event' KernelSU/kernel/manager/pkg_observer.c drivers/kernelsu/manager/pkg_observer.c 2>/dev/null || true
-
       - name: Materialize SUSFS kernel-side patchset
+        if: ${{ github.event.inputs.feature_profile == 'full' }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -679,10 +444,6 @@ jobs:
             local rej="fs/proc/fd.c.rej"
             local target="fs/proc/fd.c"
             [ -f "$rej" ] || return 0
-            echo "::warning::Auto-fixing SUSFS reject in ${target}"
-            echo "::group::fd.c reject"
-            cat "$rej" || true
-            echo "::endgroup::"
             if ! grep -q 'susfs_fd_link' "$target"; then
               if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
                 sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
@@ -699,7 +460,6 @@ jobs:
           #endif
                 }' "$target"
               else
-                echo "::error::Could not locate proc_fd_link signature in ${target}"
                 return 1
               fi
             fi
@@ -711,21 +471,8 @@ jobs:
           }
 
           drop_optional_susfs_rejects() {
-            for rej in \
-              fs/exec.c.rej \
-              fs/devpts/inode.c.rej \
-              fs/namespace.c.rej \
-              fs/overlayfs/readdir.c.rej \
-              fs/proc/task_mmu.c.rej \
-              include/linux/mount.h.rej
-            do
-              if [ -f "$rej" ]; then
-                echo "::warning::Ignoring optional SUSFS reject $rej because minimal build only enables CONFIG_KSU_SUSFS"
-                echo "::group::$(basename "$rej")"
-                cat "$rej" || true
-                echo "::endgroup::"
-                rm -f "$rej"
-              fi
+            for rej in fs/exec.c.rej fs/devpts/inode.c.rej fs/namespace.c.rej fs/overlayfs/readdir.c.rej fs/proc/task_mmu.c.rej include/linux/mount.h.rej; do
+              [ -f "$rej" ] && rm -f "$rej"
             done
             return 0
           }
@@ -737,29 +484,15 @@ jobs:
             patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
             PATCH_RC=${PIPESTATUS[0]}
             set -e
-            auto_fix_fd_proc_reject || {
-              echo "::error::Auto-fix for fs/proc/fd.c reject failed"
-              exit 1
-            }
+            auto_fix_fd_proc_reject || exit 1
             drop_optional_susfs_rejects
-            REJ_LIST="$(find . -type f -name '*.rej' | tr '\n' ' ')"
             REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
-            if [ "$REJ_COUNT" != "0" ]; then
-              echo "::error::SUSFS kernel patch left ${REJ_COUNT} reject file(s): ${REJ_LIST}"
-              find . -type f -name '*.rej' -print
-              exit 1
-            fi
-            if [ "$PATCH_RC" != "0" ]; then
-              echo "::warning::patch exited with code ${PATCH_RC} but no .rej remains; continuing"
-            fi
+            if [ "$REJ_COUNT" != "0" ]; then exit 1; fi
           fi
 
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
-          test -f include/linux/susfs.h || { echo "::error::include/linux/susfs.h missing"; exit 1; }
-          test -f fs/susfs.c || { echo "::error::fs/susfs.c missing"; exit 1; }
-          echo "::group::SUSFS inventory"
-          ls -l include/linux/susfs*.h include/linux/sus_su.h fs/susfs.c fs/sus_su.c
-          echo "::endgroup::"
+          test -f include/linux/susfs.h || exit 1
+          test -f fs/susfs.c || exit 1
 
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
@@ -768,6 +501,7 @@ jobs:
           LOG="${GITHUB_WORKSPACE}/06-defconfig-patch.log"
           exec > >(tee -a "${LOG}") 2>&1
           DEFCONFIG="${{ steps.cfg.outputs.defconfig_path }}"
+          PROFILE="${{ github.event.inputs.feature_profile }}"
 
           disable_cfg() {
             local key="$1"
@@ -781,25 +515,61 @@ jobs:
             printf '%s=y\n' "$key" >> "$DEFCONFIG"
           }
 
-          enable_cfg CONFIG_KSU
-          enable_cfg CONFIG_KSU_MANUAL_SU
-          enable_cfg CONFIG_KSU_SUSFS
+          # 1. Tắt sạch toàn bộ các tính năng độ chế trước
+          for key in \
+            CONFIG_KSU \
+            CONFIG_KSU_MANUAL_SU \
+            CONFIG_KSU_SUSFS \
+            CONFIG_KSU_TRACEPOINT_HOOK \
+            CONFIG_KSU_NONE_HOOK \
+            CONFIG_KSU_DEBUG \
+            CONFIG_KPM \
+            CONFIG_KALLSYMS_ALL
+          do
+            disable_cfg "$key"
+          done
+
+          enable_cfg CONFIG_KALLSYMS
+
+          # 2. Xử lý theo Profile (Triage Logic)
+          case "$PROFILE" in
+            baseline_noroot)
+              echo "::warning::Profile=baseline_noroot -> Tắt toàn bộ KSU/SUSFS để test nhân kernel thuần"
+              ;;
+            ksu_nosusfs)
+              echo "::warning::Profile=ksu_nosusfs -> Chỉ bật KSU, tắt SUSFS"
+              enable_cfg CONFIG_KSU
+              enable_cfg CONFIG_KSU_NONE_HOOK
+              ;;
+            full)
+              echo "::warning::Profile=full -> Bật KSU manual-su + SUSFS"
+              enable_cfg CONFIG_KSU
+              enable_cfg CONFIG_KSU_MANUAL_SU
+              enable_cfg CONFIG_KSU_SUSFS
+              disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
+              disable_cfg CONFIG_KSU_NONE_HOOK
+              ;;
+            *)
+              echo "::error::Unknown feature_profile=$PROFILE"
+              exit 1
+              ;;
+          esac
+
           disable_cfg CONFIG_KPM
-          disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
-          disable_cfg CONFIG_KSU_NONE_HOOK
           disable_cfg CONFIG_KSU_DEBUG
 
-          disable_cfg CONFIG_KNOX
-          disable_cfg CONFIG_KNOX_GUARD
+          # 3. Giữ phần cốt lõi của DEFEX cho an toàn, chỉ diệt các lớp phụ (Theo kinh nghiệm boot system)
+          disable_cfg CONFIG_SECURITY_DEFEX_RESTRICT_FILE
+          disable_cfg CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL
           disable_cfg CONFIG_SEC_RESTRICT_SETUID
           disable_cfg CONFIG_SEC_RESTRICT_ROOTING
 
+          disable_cfg CONFIG_KNOX
+          disable_cfg CONFIG_KNOX_GUARD
+
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
-            echo "::warning::Aggressive mode: stripping DEFEX/PROCA/RKP/TIMA"
+            echo "::warning::Aggressive mode: Tiêu diệt các lớp bảo mật Samsung khác, nhưng giữ lại DEFEX core"
             for key in \
-              CONFIG_SECURITY_DEFEX \
-              CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
-              CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
               CONFIG_SECURITY_PROCA \
               CONFIG_PROCA \
               CONFIG_RKP \
@@ -814,11 +584,11 @@ jobs:
               disable_cfg "$key"
             done
           else
-            echo "::notice::Minimal mode: keep DEFEX/PROCA/RKP/TIMA to prioritize boot"
+            echo "::notice::Minimal mode: Giữ lại bảo mật để ưu tiên boot"
           fi
 
-          echo "::group::Defconfig flags"
-          grep -E 'CONFIG_KSU|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
+          echo "::group::Defconfig flags ($PROFILE)"
+          grep -E 'CONFIG_KSU|CONFIG_KPM|KALLSYMS|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
           echo "::endgroup::"
 
       - name: Build kernel
@@ -840,8 +610,8 @@ jobs:
 
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${TC_DIR}/clang-primary/bin:${PATH}"
           export LLVM_PREFIX="${TC_DIR}/clang-primary/bin/"
-          export KBUILD_BUILD_USER="github-actions"
-          export KBUILD_BUILD_HOST="ubuntu-24.04"
+          export KBUILD_BUILD_USER="samsung"
+          export KBUILD_BUILD_HOST="localbuild"
           export LOCALVERSION="-${KERNEL_NAME}-$(date +%Y%m%d-%H%M)"
           export CROSS_COMPILE="aarch64-linux-gnu-"
           export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
@@ -858,30 +628,9 @@ jobs:
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" \
-              ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
-              CC="$cc_bin" LD="$ld_bin" \
-              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
-              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
-              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
-              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
-              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
-              CLANG_TRIPLE="aarch64-linux-gnu-" \
-              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-              "vendor/${DEFCONFIG}" \
-              2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
 
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" \
-              ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" \
-              CC="$cc_bin" LD="$ld_bin" \
-              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" \
-              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
-              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
-              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
-              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
-              CLANG_TRIPLE="aarch64-linux-gnu-" \
-              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-              2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
           }
 
           if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
@@ -894,21 +643,12 @@ jobs:
           fi
 
           test -f "${OUT_DIR}/arch/arm64/boot/Image"
-          file "${OUT_DIR}/arch/arm64/boot/Image" || true
-          ccache -s || true
           EOF
 
           chmod +x "${GITHUB_WORKSPACE}/build-kernel.sh"
-
           export KERNEL_NAME="${{ github.event.inputs.kernel_name }}"
           export DEFCONFIG="${{ steps.cfg.outputs.defconfig }}"
           export OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
-
-          echo "::group::build-kernel.sh"
-          nl -ba "${GITHUB_WORKSPACE}/build-kernel.sh"
-          echo "::endgroup::"
-
-          bash -n "${GITHUB_WORKSPACE}/build-kernel.sh"
           bash "${GITHUB_WORKSPACE}/build-kernel.sh"
 
       - name: Prepare AnyKernel3 package
@@ -951,14 +691,11 @@ jobs:
           flash_boot;
           EOF
 
-          # Chỉ copy duy nhất lõi Kernel Image tinh khiết
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" AnyKernel3/Image
-
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
-            zip -r9 "../$ZIP_NAME" . \
-              -x '.git/*' '.github/*' 'README.md' '*.gitignore'
+            zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*.gitignore'
           )
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
@@ -972,69 +709,17 @@ jobs:
             [ -f "$f" ] || continue
             ERR_LINES=$(grep -nEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "$f" | tail -n 20)
             if [ -n "$ERR_LINES" ]; then
-              echo "========================================"
               echo "🔥 TÌM THẤY LỖI TRONG FILE: $(basename "$f")"
-              echo "========================================"
               echo "$ERR_LINES"
-              
-              # Gửi annotation để hiện ra màn hình chính của GitHub Actions
-              echo "$ERR_LINES" | while IFS= read -r line; do
-                # Xóa các ký tự đặc biệt nếu có để in ra annotation sạch
-                clean_line=$(echo "$line" | sed 's/[^a-zA-Z0-9 _-:/.,()]//g')
-                echo "::error::[$(basename "$f")] $clean_line"
-              done
-            else
-              # Nếu không tìm thấy pattern lỗi quen thuộc, in ra 15 dòng cuối
-              echo "========================================"
-              echo "⚠️ KHÔNG TÌM THẤY MÃ LỖI RÕ RÀNG TRONG: $(basename "$f")"
-              echo "Dưới đây là 15 dòng cuối cùng:"
-              echo "========================================"
-              tail -n 15 "$f"
             fi
-            echo
           done
           echo "::endgroup::"
-
-          # In thẳng lỗi ra màn hình tóm tắt của Job (Summary)
           {
             echo "## ❌ Báo cáo Lỗi Biên Dịch (Smart Error Report)"
-            echo "Copy đoạn code bên dưới ném cho AI để fix:"
             echo '```text'
-            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 40 || echo "Hãy lấy 20 dòng cuối trong file log bị lỗi."
+            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 40 || echo "Lấy 20 dòng cuối trong log."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Write job summary
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          {
-            echo "## SM7325 A52s SukiSU/SUSFS build summary"
-            echo
-            echo "- kernel_branch: `${{ github.event.inputs.kernel_branch }}`"
-            echo "- region: `${{ github.event.inputs.region }}`"
-            echo "- security_mode: `${{ github.event.inputs.security_mode }}`"
-            echo "- sukisu_ref: `${{ env.SUKISU_REF }}`"
-            echo "- defconfig: `${{ steps.cfg.outputs.defconfig || 'unresolved' }}`"
-            echo "- toolchain: `${{ steps.build.outputs.toolchain || 'failed-before-build' }}`"
-            echo
-            echo "### Tail of all logs"
-            echo '```text'
-            tail -n 80 ./*.log 2>/dev/null || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Pack debug bundle
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p debug
-          cp -f ./*.log debug/ 2>/dev/null || true
-          cp -f "${{ steps.cfg.outputs.defconfig_path }}" debug/defconfig.after 2>/dev/null || true
-          cp -f AnyKernel3/anykernel.sh debug/anykernel.sh.after 2>/dev/null || true
-          find kernel -type f \( -name '*.rej' -o -name '*.orig' \) -exec cp --parents {} debug/ \; 2>/dev/null || true
 
       - name: Upload flashable AnyKernel3 zip
         if: ${{ success() }}
@@ -1042,27 +727,4 @@ jobs:
         with:
           name: ${{ steps.pack.outputs.zip_name }}
           path: ${{ github.workspace }}/${{ steps.pack.outputs.zip_name }}
-          if-no-files-found: error
-
-      - name: Upload debug logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sm7325-debug-${{ github.run_id }}
-          path: debug/
-          if-no-files-found: warn
-
-      - name: Create patched source archive
-        if: ${{ always() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          tar --exclude='.git' -caf patched-sm7325-source.tar.zst kernel
-
-      - name: Upload patched source artifact
-        if: ${{ always() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: patched-sm7325-source-${{ github.run_id }}
-          path: patched-sm7325-source.tar.zst
           if-no-files-found: error
