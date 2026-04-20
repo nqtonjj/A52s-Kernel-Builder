@@ -29,19 +29,19 @@ on:
           - minimal
           - aggressive
       feature_profile:
-        description: "Boot triage profile (Khoanh vùng lỗi boot)"
+        description: "Boot triage profile"
         required: true
         type: choice
-        default: "baseline_noroot"
+        default: "ksu_nosusfs"
         options:
           - baseline_noroot
           - ksu_nosusfs
           - full
       touch_defex_stub:
-        description: "Bật vá lỗi liệt cảm ứng DEFEX (Chỉ dùng khi đã boot vào được màn hình chính)"
+        description: "Patch DEFEX call-sites in touchscreen drivers"
         required: true
         type: boolean
-        default: false
+        default: true
       upload_patched_source:
         description: "Upload patched source tarball"
         required: true
@@ -49,12 +49,12 @@ on:
         default: false
 
 concurrency:
-  group: sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}
-  cancel-in-progress: false
+  group: sm7325-${{ github.ref_name }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 240
     permissions:
       contents: read
@@ -129,7 +129,7 @@ jobs:
           AVAILABLE_GB="$(df --output=avail -BG / | tail -n1 | tr -dc '0-9')"
           echo "Available disk after cleanup: ${AVAILABLE_GB}GB"
           if [ "${AVAILABLE_GB}" -lt 18 ]; then
-            echo "::warning::Disk after cleanup is below 18GB. Build may still work but headroom is tighter than desired."
+            echo "::warning::Disk after cleanup is below 18GB. Build may still work but margin is lower than ideal."
           else
             echo "::notice::Disk cleanup succeeded with ${AVAILABLE_GB}GB available."
           fi
@@ -160,6 +160,7 @@ jobs:
             jq \
             libelf-dev \
             libssl-dev \
+            libncurses-dev \
             pahole \
             patch \
             python3 \
@@ -191,7 +192,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-clean-v3
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v6
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -205,7 +206,7 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           git clone --depth=1 --filter=blob:none -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
           cd kernel
-          git log --oneline -1
+          git log --oneline -1 | tee "${GITHUB_WORKSPACE}/kernel_commit.txt"
           git submodule status || true
           test -d arch/arm64/configs/vendor
 
@@ -228,41 +229,46 @@ jobs:
           echo "defconfig_path=${DEFCONFIG_PATH}" >> "${GITHUB_OUTPUT}"
           echo "out_dir=${GITHUB_WORKSPACE}/out" >> "${GITHUB_OUTPUT}"
 
-      - name: Replace bundled KernelSU with SukiSU-Ultra
+      - name: Integrate SukiSU-Ultra
+        if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
         run: |
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/04-sukisu-integrate.log"
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
+
           rm -rf KernelSU drivers/kernelsu
           git config --global advice.detachedHead false
 
-          if [[ "${SUKISU_REF}" =~ ^[0-9a-f]{7,40}$ ]]; then
-            git clone --filter=blob:none --no-checkout "${SUKISU_REPO}" KernelSU
-            git -C KernelSU fetch --depth=256 origin main
-            git -C KernelSU checkout "${SUKISU_REF}" || {
-              git -C KernelSU fetch --depth=2048 origin main
-              git -C KernelSU checkout "${SUKISU_REF}"
-            }
-          else
-            git clone --depth=1 --filter=blob:none -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
+          git clone --filter=blob:none --no-checkout "${SUKISU_REPO}" KernelSU
+          git -C KernelSU fetch --depth=256 origin main
+          git -C KernelSU checkout "${SUKISU_REF}" || {
+            git -C KernelSU fetch --depth=2048 origin main
+            git -C KernelSU checkout "${SUKISU_REF}"
+          }
+
+          if [ -x KernelSU/kernel/setup.sh ]; then
+            bash KernelSU/kernel/setup.sh "${SUKISU_REF}" || true
           fi
 
           test -d KernelSU/kernel
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
+
           sed -i '/kernelsu\//d' drivers/Makefile
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+
           sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
           sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
-          echo "::group::SukiSU HEAD"
-          git -C KernelSU rev-parse --abbrev-ref HEAD || true
-          git -C KernelSU rev-parse --short HEAD
-          git -C KernelSU log --oneline -1
-          echo "::endgroup::"
+          git -C KernelSU rev-parse HEAD | tee "${GITHUB_WORKSPACE}/sukisu_commit.txt"
+
+          test -L drivers/kernelsu
+          grep -q 'kernelsu/' drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
 
       - name: Apply non-interactive SukiSU compatibility patches
+        if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -270,6 +276,7 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
+          echo "::notice::Patching KPM"
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
@@ -297,11 +304,13 @@ jobs:
           #endif
           EOF
 
+          echo "::notice::Patching pgtable.h to mm.h"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null || true)
 
+          echo "::notice::Patching _nofault functions"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i \
@@ -314,7 +323,7 @@ jobs:
             grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
           done < <(grep -RIlE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          echo "::notice::Patching legacy allowlist task_work API for Samsung Linux 5.4"
+          echo "::notice::Patching allowlist task_work API for Samsung Linux 5.4"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
@@ -326,7 +335,7 @@ jobs:
           original = s
 
           if 'TWA_RESUME' in s:
-              s = s.replace('TWA_RESUME', 'true')
+              s = s.replace('TWA_RESUME', '1')
 
           if 'put_task_struct' in s and '#include <linux/sched/task.h>' not in s:
               lines = s.splitlines()
@@ -350,11 +359,13 @@ jobs:
           static inline void perf_log_printk(const char *fmt, ...) {}
           #endif
           EOF
+
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i 's|<log/perflog.h>|<linux/log/perflog.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'perflog.h' kernel drivers fs KernelSU drivers/kernelsu 2>/dev/null || true)
 
+          echo "::notice::Patching seccomp_cache.c"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             grep -q '<asm/seccomp.h>' "$f" || sed -i '/#include <linux\/seccomp.h>/a #include <asm/seccomp.h>' "$f"
@@ -384,6 +395,7 @@ jobs:
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/seccomp_cache.c' -type f 2>/dev/null)
 
+          echo "::notice::Patching file_wrapper.c"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i \
@@ -392,69 +404,76 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          echo "::notice::Patching dispatch.c incompatibility for Samsung Linux 5.4"
+          echo "::notice::Hard-patching dispatch.c incompatibility for Samsung Linux 5.4"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
+          import re
 
           p = Path(sys.argv[1])
-          lines = p.read_text().splitlines()
+          s = p.read_text()
+          original = s
+          tokens = ('tasklist_lock', 'task_pgrp', 'task_session', 'init_task')
 
-          def add_include(lines_obj, header):
-              inc = f'#include <{header}>'
-              if inc in lines_obj:
-                  return lines_obj
-              insert_at = 0
-              for idx, line in enumerate(lines_obj):
-                  if line.startswith('#include '):
-                      insert_at = idx + 1
-              lines_obj.insert(insert_at, inc)
-              return lines_obj
+          if any(t in s for t in tokens):
+              pattern = re.compile(
+                  r'(?ms)^(?P<indent>[ \t]*)(?:read|write)_lock\(&tasklist_lock\);\n'
+                  r'(?:(?!^[ \t]*(?:read|write)_unlock\(&tasklist_lock\);).*\n){0,120}'
+                  r'^[ \t]*(?:read|write)_unlock\(&tasklist_lock\);\n?'
+              )
 
-          original = '\n'.join(lines) + ('\n' if lines else '')
-
-          lines = add_include(lines, 'linux/rcupdate.h')
-
-          start = None
-          end = None
-          unlock_hits = 0
-
-          for i, line in enumerate(lines):
-              if start is None:
-                  if 'tasklist_lock' in line:
-                      window = '\n'.join(lines[i:i + 40])
-                      if 'task_pgrp' in window and 'task_session' in window and 'init_task' in window:
-                          start = i
-              else:
-                  if 'read_unlock(&tasklist_lock)' in line or 'write_unlock(&tasklist_lock)' in line:
-                      unlock_hits += 1
-                      if unlock_hits >= 2:
-                          end = i
-                          break
-
-          if start is not None and end is None:
-              for i in range(start, min(len(lines), start + 40)):
-                  if 'read_unlock(&tasklist_lock)' in lines[i] or 'write_unlock(&tasklist_lock)' in lines[i]:
-                      end = i
+              changed = False
+              while True:
+                  m = pattern.search(s)
+                  if not m:
                       break
+                  block = m.group(0)
+                  if not any(t in block for t in tokens):
+                      break
+                  indent = m.group('indent')
+                  repl = (
+                      f"{indent}/* KSU_SM7325_DISPATCH_COMPAT_BEGIN */\n"
+                      f"{indent}/* Removed incompatible tasklist/session block for Samsung Linux 5.4 */\n"
+                      f"{indent}/* KSU_SM7325_DISPATCH_COMPAT_END */\n"
+                  )
+                  s = s[:m.start()] + repl + s[m.end():]
+                  changed = True
 
-          if start is not None and end is not None:
-              indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
-              replacement = [
-                  indent + '/* KSU_SM7325_COMPAT_SKIP_TASKLIST_CHECK_BEGIN */',
-                  indent + '/* Samsung Linux 5.4 tree does not provide the newer tasklist/session helper combination used here. */',
-                  indent + '/* This compatibility patch removes that process-group/session gate to keep SukiSU building on SM7325. */',
-                  indent + '/* KSU_SM7325_COMPAT_SKIP_TASKLIST_CHECK_END */',
-              ]
-              lines = lines[:start] + replacement + lines[end + 1:]
+              if any(t in s for t in tokens):
+                  lines = s.splitlines()
+                  new_lines = []
+                  i = 0
+                  while i < len(lines):
+                      line = lines[i]
+                      if any(t in line for t in tokens):
+                          start = i
+                          for j in range(max(0, i - 8), i + 1):
+                              if 'lock(&tasklist_lock)' in lines[j]:
+                                  start = j
+                                  break
+                          end = i
+                          for j in range(i, min(len(lines), i + 120)):
+                              if 'unlock(&tasklist_lock)' in lines[j]:
+                                  end = j
+                                  break
+                          indent = re.match(r'[ \t]*', lines[start]).group(0)
+                          new_lines.append(f"{indent}/* KSU_SM7325_DISPATCH_COMPAT_FALLBACK: stripped incompatible tasklist/session block */")
+                          i = end + 1
+                          changed = True
+                          continue
+                      new_lines.append(line)
+                      i += 1
+                  s = '\n'.join(new_lines) + ('\n' if new_lines else '')
 
-          new_text = '\n'.join(lines) + ('\n' if lines else '')
-          if new_text != original:
-              p.write_text(new_text)
+              if any(t in s for t in tokens):
+                  raise SystemExit(f"FAIL: {p.name} still contains incompatible tasklist/session symbols after patch!")
+
+          if s != original:
+              p.write_text(s)
           PY
-            echo "patched dispatch.c legacy tasklist/session block: $f"
+            echo "patched dispatch.c: $f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
 
           while IFS= read -r f; do
@@ -513,7 +532,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
 
-          echo "::notice::Injecting missing <linux/minmax.h> for Kernel 5.4 compatibility"
+          echo "::notice::Injecting minmax.h"
           mkdir -p include/linux
           cat > include/linux/minmax.h <<'EOF'
           #ifndef _LINUX_MINMAX_H
@@ -530,7 +549,7 @@ jobs:
           #endif
           EOF
 
-          echo "::notice::Force-linking legacy manual-hook symbols directly inside supercall.c"
+          echo "::notice::Force-linking legacy manual-hook symbols"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
@@ -556,14 +575,6 @@ jobs:
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/supercall.c' -type f 2>/dev/null)
 
-          echo "::group::compat-verification"
-          grep -RIn 'TWA_RESUME' KernelSU drivers/kernelsu 2>/dev/null || true
-          grep -RIn 'tasklist_lock' KernelSU drivers/kernelsu 2>/dev/null || true
-          grep -RIn 'task_pgrp' KernelSU drivers/kernelsu 2>/dev/null || true
-          grep -RIn 'task_session' KernelSU drivers/kernelsu 2>/dev/null || true
-          grep -RIn 'init_task' KernelSU drivers/kernelsu 2>/dev/null || true
-          echo "::endgroup::"
-
       - name: Apply optional guarded touchscreen DEFEX stub
         if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
         shell: bash
@@ -586,10 +597,6 @@ jobs:
                 echo "stubbed: $f"
               done
 
-          echo "::group::touch-defex-stub-result"
-          grep -RInE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' drivers/input/touchscreen 2>/dev/null || true
-          echo "::endgroup::"
-
       - name: Materialize SUSFS kernel-side patchset
         if: ${{ github.event.inputs.feature_profile == 'full' }}
         shell: bash
@@ -598,10 +605,12 @@ jobs:
           LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
+
           rm -rf ../susfs4ksu
           git clone --depth=1 --filter=blob:none -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
-          cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/
-          cp -fv ../susfs4ksu/kernel_patches/fs/* fs/
+          cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+          cp -fv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+
           SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
           test -n "${SUSFS_KERNEL_PATCH}"
 
@@ -651,7 +660,7 @@ jobs:
             set -e
             auto_fix_fd_proc_reject || exit 1
             drop_optional_susfs_rejects
-            REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
+            REJ_COUNT="$(find . -name '*.rej' | wc -l | tr -d ' ')"
             if [ "$REJ_COUNT" != "0" ]; then
               exit 1
             fi
@@ -699,15 +708,15 @@ jobs:
 
           case "$PROFILE" in
             baseline_noroot)
-              echo "::warning::Profile=baseline_noroot -> Tắt toàn bộ KSU/SUSFS để test nhân kernel thuần"
+              echo "::warning::Profile=baseline_noroot -> Disable KSU/SUSFS"
               ;;
             ksu_nosusfs)
-              echo "::warning::Profile=ksu_nosusfs -> Chỉ bật KSU, tắt SUSFS"
+              echo "::warning::Profile=ksu_nosusfs -> Enable KSU only"
               enable_cfg CONFIG_KSU
               enable_cfg CONFIG_KSU_NONE_HOOK
               ;;
             full)
-              echo "::warning::Profile=full -> Bật KSU manual-su + SUSFS"
+              echo "::warning::Profile=full -> Enable KSU manual-su + SUSFS"
               enable_cfg CONFIG_KSU
               enable_cfg CONFIG_KSU_MANUAL_SU
               enable_cfg CONFIG_KSU_SUSFS
@@ -738,7 +747,7 @@ jobs:
           fi
 
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
-            echo "::warning::Aggressive mode: Tiêu diệt các lớp bảo mật Samsung khác, nhưng giữ lại DEFEX core"
+            echo "::warning::Aggressive mode: Strip Samsung security branches"
             for key in \
               CONFIG_SECURITY_PROCA \
               CONFIG_PROCA \
@@ -754,7 +763,7 @@ jobs:
               disable_cfg "$key"
             done
           else
-            echo "::notice::Minimal mode: Giữ lại bảo mật để ưu tiên boot"
+            echo "::notice::Minimal mode: Keep security core to prioritize boot"
           fi
 
           echo "::group::Defconfig flags ($PROFILE)"
