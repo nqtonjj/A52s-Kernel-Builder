@@ -78,15 +78,65 @@ jobs:
       - name: Checkout workflow repository
         uses: actions/checkout@v4
 
-      - name: Free disk space
+      - name: Free up disk space aggressively
         shell: bash
         run: |
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/00-free-space.log"
           exec > >(tee -a "${LOG}") 2>&1
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
-          docker system prune -af || true
+
+          echo "::group::disk-before"
           df -h
+          sudo du -sh /usr/share/dotnet 2>/dev/null || true
+          sudo du -sh /opt/ghc 2>/dev/null || true
+          sudo du -sh /usr/local/lib/android 2>/dev/null || true
+          sudo du -sh /usr/share/swift 2>/dev/null || true
+          sudo du -sh /opt/hostedtoolcache 2>/dev/null || true
+          echo "::endgroup::"
+
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/swift || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /opt/hostedtoolcache/go || true
+          sudo rm -rf /opt/hostedtoolcache/Python || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /usr/local/julia* || true
+          sudo rm -rf /usr/share/miniconda || true
+          sudo rm -rf /usr/lib/jvm || true
+
+          docker system prune -af || true
+          sudo swapoff -a || true
+          sudo rm -f /swapfile || true
+
+          sudo apt-get update
+          sudo apt-get purge -y \
+            '^dotnet-.*' \
+            '^llvm-.*' \
+            'php.*' \
+            'mongodb-.*' \
+            'mysql-.*' \
+            'postgresql.*' \
+            'azure-cli' \
+            'google-cloud-cli' \
+            'google-cloud-sdk' \
+            'firefox' \
+            'powershell' || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean || true
+
+          AVAILABLE_GB="$(df --output=avail -BG / | tail -n1 | tr -dc '0-9')"
+          echo "Available disk after cleanup: ${AVAILABLE_GB}GB"
+          if [ "${AVAILABLE_GB}" -lt 18 ]; then
+            echo "::warning::Disk after cleanup is below 18GB. Build may still work but headroom is tighter than desired."
+          else
+            echo "::notice::Disk cleanup succeeded with ${AVAILABLE_GB}GB available."
+          fi
+
+          echo "::group::disk-after"
+          df -h
+          echo "::endgroup::"
 
       - name: Install build dependencies
         shell: bash
@@ -96,10 +146,34 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential ccache cpio curl device-tree-compiler file flex gawk git jq \
-            libelf-dev libssl-dev pahole patch python3 rsync unzip xz-utils zip zstd \
-            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
-            gcc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi g++
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            cpio \
+            curl \
+            device-tree-compiler \
+            file \
+            flex \
+            gawk \
+            git \
+            jq \
+            libelf-dev \
+            libssl-dev \
+            pahole \
+            patch \
+            python3 \
+            rsync \
+            unzip \
+            xz-utils \
+            zip \
+            zstd \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            gcc \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            g++
           gcc --version || true
 
       - name: Setup Proton Clang
@@ -109,7 +183,7 @@ jobs:
           LOG="${GITHUB_WORKSPACE}/01b-toolchain.log"
           exec > >(tee -a "${LOG}") 2>&1
           mkdir -p "${TC_DIR}"
-          git clone --depth=1 "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
+          git clone --depth=1 --filter=blob:none "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
           "${TC_DIR}/clang-primary/bin/clang" --version
           "${TC_DIR}/clang-primary/bin/ld.lld" --version || true
 
@@ -117,7 +191,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-clean-v1
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-clean-v3
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -129,7 +203,7 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/02-kernel-clone.log"
           exec > >(tee -a "${LOG}") 2>&1
-          git clone --depth=1 -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
+          git clone --depth=1 --filter=blob:none -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
           cd kernel
           git log --oneline -1
           git submodule status || true
@@ -172,7 +246,7 @@ jobs:
               git -C KernelSU checkout "${SUKISU_REF}"
             }
           else
-            git clone --depth=1 -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
+            git clone --depth=1 --filter=blob:none -b "${SUKISU_REF}" "${SUKISU_REPO}" KernelSU
           fi
 
           test -d KernelSU/kernel
@@ -196,7 +270,6 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
-          # === HARD DISABLE KPM ===
           rm -rf KernelSU/kernel/kpm drivers/kernelsu/kpm 2>/dev/null || true
           for f in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$f" ] && sed -i '/\bkpm\b/d' "$f" || true
@@ -208,6 +281,7 @@ jobs:
             [ -f "$f" ] || continue
             sed -i '/kpm\/kpm\.h/d' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'kpm/kpm.h' KernelSU drivers/kernelsu 2>/dev/null || true)
+
           KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
           [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
           mkdir -p "${KSU_REAL_DIR}/kpm"
@@ -223,13 +297,11 @@ jobs:
           #endif
           EOF
 
-          # === FIX pgtable.h ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          # === FIX _nofault functions ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i \
@@ -242,7 +314,35 @@ jobs:
             grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
           done < <(grep -RIlE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          # === FIX perflog.h ===
+          echo "::notice::Patching legacy allowlist task_work API for Samsung Linux 5.4"
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          original = s
+
+          if 'TWA_RESUME' in s:
+              s = s.replace('TWA_RESUME', 'true')
+
+          if 'put_task_struct' in s and '#include <linux/sched/task.h>' not in s:
+              lines = s.splitlines()
+              insert_at = 0
+              for i, line in enumerate(lines):
+                  if line.startswith('#include '):
+                      insert_at = i + 1
+              lines.insert(insert_at, '#include <linux/sched/task.h>')
+              s = '\n'.join(lines) + '\n'
+
+          if s != original:
+              p.write_text(s)
+          PY
+            echo "patched allowlist legacy API: $f"
+          done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
+
           mkdir -p include/linux/log
           cat > include/linux/log/perflog.h <<'EOF'
           #ifndef _LINUX_PERFLOG_H
@@ -255,7 +355,6 @@ jobs:
             sed -i 's|<log/perflog.h>|<linux/log/perflog.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'perflog.h' kernel drivers fs KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          # === FIX seccomp_cache.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             grep -q '<asm/seccomp.h>' "$f" || sed -i '/#include <linux\/seccomp.h>/a #include <asm/seccomp.h>' "$f"
@@ -285,7 +384,6 @@ jobs:
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/seccomp_cache.c' -type f 2>/dev/null)
 
-          # === FIX file_wrapper.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i \
@@ -294,7 +392,71 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          # === FIX pkg_observer.c (STUB) ===
+          echo "::notice::Patching dispatch.c incompatibility for Samsung Linux 5.4"
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          lines = p.read_text().splitlines()
+
+          def add_include(lines_obj, header):
+              inc = f'#include <{header}>'
+              if inc in lines_obj:
+                  return lines_obj
+              insert_at = 0
+              for idx, line in enumerate(lines_obj):
+                  if line.startswith('#include '):
+                      insert_at = idx + 1
+              lines_obj.insert(insert_at, inc)
+              return lines_obj
+
+          original = '\n'.join(lines) + ('\n' if lines else '')
+
+          lines = add_include(lines, 'linux/rcupdate.h')
+
+          start = None
+          end = None
+          unlock_hits = 0
+
+          for i, line in enumerate(lines):
+              if start is None:
+                  if 'tasklist_lock' in line:
+                      window = '\n'.join(lines[i:i + 40])
+                      if 'task_pgrp' in window and 'task_session' in window and 'init_task' in window:
+                          start = i
+              else:
+                  if 'read_unlock(&tasklist_lock)' in line or 'write_unlock(&tasklist_lock)' in line:
+                      unlock_hits += 1
+                      if unlock_hits >= 2:
+                          end = i
+                          break
+
+          if start is not None and end is None:
+              for i in range(start, min(len(lines), start + 40)):
+                  if 'read_unlock(&tasklist_lock)' in lines[i] or 'write_unlock(&tasklist_lock)' in lines[i]:
+                      end = i
+                      break
+
+          if start is not None and end is not None:
+              indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+              replacement = [
+                  indent + '/* KSU_SM7325_COMPAT_SKIP_TASKLIST_CHECK_BEGIN */',
+                  indent + '/* Samsung Linux 5.4 tree does not provide the newer tasklist/session helper combination used here. */',
+                  indent + '/* This compatibility patch removes that process-group/session gate to keep SukiSU building on SM7325. */',
+                  indent + '/* KSU_SM7325_COMPAT_SKIP_TASKLIST_CHECK_END */',
+              ]
+              lines = lines[:start] + replacement + lines[end + 1:]
+
+          new_text = '\n'.join(lines) + ('\n' if lines else '')
+          if new_text != original:
+              p.write_text(new_text)
+          PY
+            echo "patched dispatch.c legacy tasklist/session block: $f"
+          done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
+
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
@@ -306,7 +468,6 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          # === FIX app_profile.c (STUB) ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
@@ -316,7 +477,6 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
-          # === STUB selinux/rules.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
@@ -326,7 +486,6 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
 
-          # === STUB selinux/sepolicy.c ===
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
@@ -354,7 +513,6 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
 
-          # === FAKE minmax.h ===
           echo "::notice::Injecting missing <linux/minmax.h> for Kernel 5.4 compatibility"
           mkdir -p include/linux
           cat > include/linux/minmax.h <<'EOF'
@@ -372,20 +530,6 @@ jobs:
           #endif
           EOF
 
-          # === FIX TWA_RESUME & put_task_struct GLOBALLY (Samsung 5.4 compat) ===
-          echo "::notice::Force injecting task_work, sched/task.h and TWA_RESUME macro globally"
-          find -L KernelSU drivers/kernelsu -type f -name '*.c' 2>/dev/null | while IFS= read -r f; do
-            if grep -q 'put_task_struct' "$f"; then
-              grep -q '<linux/sched/task.h>' "$f" || sed -i '1i #include <linux/sched/task.h>' "$f"
-            fi
-            if grep -q 'TWA_RESUME' "$f"; then
-              grep -q '<linux/task_work.h>' "$f" || sed -i '1i #include <linux/task_work.h>' "$f"
-              grep -q '<linux/sched/task.h>' "$f" || sed -i '1i #include <linux/sched/task.h>' "$f"
-              grep -q '#define TWA_RESUME' "$f" || sed -i '1i #ifndef TWA_RESUME\n#define TWA_RESUME 1\n#endif' "$f"
-            fi
-          done
-
-          # === FIX link-time unresolved KSU/manual-hook symbols on Samsung 5.4 ===
           echo "::notice::Force-linking legacy manual-hook symbols directly inside supercall.c"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
@@ -411,6 +555,14 @@ jobs:
               p.write_text(s)
           PY
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/supercall.c' -type f 2>/dev/null)
+
+          echo "::group::compat-verification"
+          grep -RIn 'TWA_RESUME' KernelSU drivers/kernelsu 2>/dev/null || true
+          grep -RIn 'tasklist_lock' KernelSU drivers/kernelsu 2>/dev/null || true
+          grep -RIn 'task_pgrp' KernelSU drivers/kernelsu 2>/dev/null || true
+          grep -RIn 'task_session' KernelSU drivers/kernelsu 2>/dev/null || true
+          grep -RIn 'init_task' KernelSU drivers/kernelsu 2>/dev/null || true
+          echo "::endgroup::"
 
       - name: Apply optional guarded touchscreen DEFEX stub
         if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
@@ -447,7 +599,7 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
           rm -rf ../susfs4ksu
-          git clone --depth=1 -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
+          git clone --depth=1 --filter=blob:none -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
           cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/
           cp -fv ../susfs4ksu/kernel_patches/fs/* fs/
           SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
@@ -500,12 +652,14 @@ jobs:
             auto_fix_fd_proc_reject || exit 1
             drop_optional_susfs_rejects
             REJ_COUNT="$(find . -type f -name '*.rej' | wc -l | tr -d ' ')"
-            if [ "$REJ_COUNT" != "0" ]; then exit 1; fi
+            if [ "$REJ_COUNT" != "0" ]; then
+              exit 1
+            fi
           fi
 
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
-          test -f include/linux/susfs.h || exit 1
-          test -f fs/susfs.c || exit 1
+          test -f include/linux/susfs.h
+          test -f fs/susfs.c
 
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
@@ -528,7 +682,6 @@ jobs:
             printf '%s=y\n' "$key" >> "$DEFCONFIG"
           }
 
-          # 1. Tắt sạch toàn bộ các tính năng độ chế trước
           for key in \
             CONFIG_KSU \
             CONFIG_KSU_MANUAL_SU \
@@ -544,7 +697,6 @@ jobs:
 
           enable_cfg CONFIG_KALLSYMS
 
-          # 2. Xử lý theo Profile (Triage Logic)
           case "$PROFILE" in
             baseline_noroot)
               echo "::warning::Profile=baseline_noroot -> Tắt toàn bộ KSU/SUSFS để test nhân kernel thuần"
@@ -571,7 +723,6 @@ jobs:
           disable_cfg CONFIG_KPM
           disable_cfg CONFIG_KSU_DEBUG
 
-          # 3. Giữ phần cốt lõi của DEFEX cho an toàn, chỉ diệt các lớp phụ (Theo kinh nghiệm boot system)
           disable_cfg CONFIG_SECURITY_DEFEX_RESTRICT_FILE
           disable_cfg CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL
           disable_cfg CONFIG_SEC_RESTRICT_SETUID
@@ -579,6 +730,12 @@ jobs:
 
           disable_cfg CONFIG_KNOX
           disable_cfg CONFIG_KNOX_GUARD
+
+          if grep -q '^CONFIG_SECURITY_DEFEX=' "$DEFCONFIG"; then
+            sed -i 's/^CONFIG_SECURITY_DEFEX=.*/CONFIG_SECURITY_DEFEX=y/' "$DEFCONFIG"
+          elif ! grep -q '^CONFIG_SECURITY_DEFEX=y$' "$DEFCONFIG"; then
+            printf 'CONFIG_SECURITY_DEFEX=y\n' >> "$DEFCONFIG"
+          fi
 
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
             echo "::warning::Aggressive mode: Tiêu diệt các lớp bảo mật Samsung khác, nhưng giữ lại DEFEX core"
@@ -664,6 +821,19 @@ jobs:
           export OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
           bash "${GITHUB_WORKSPACE}/build-kernel.sh"
 
+      - name: Pack patched source tarball
+        if: ${{ success() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
+        id: srcpack
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/09b-source-pack.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+          TAR_NAME="patched-kernel-source-${{ github.event.inputs.region }}-$(date +%Y%m%d-%H%M).tar.zst"
+          tar --exclude='.git' -I 'zstd -19 -T0' -cf "${GITHUB_WORKSPACE}/${TAR_NAME}" .
+          echo "tar_name=${TAR_NAME}" >> "${GITHUB_OUTPUT}"
+
       - name: Prepare AnyKernel3 package
         if: ${{ success() }}
         id: pack
@@ -672,7 +842,7 @@ jobs:
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/10-pack.log"
           exec > >(tee -a "${LOG}") 2>&1
-          git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel3
+          git clone --depth=1 --filter=blob:none "$ANYKERNEL_REPO" AnyKernel3
 
           cat > AnyKernel3/anykernel.sh <<'EOF'
           ## AnyKernel3 Ramdisk Mod Script
@@ -693,7 +863,7 @@ jobs:
           supported.vendorpatchlevels=
           '; } # end properties
 
-          BLOCK=/dev/block/bootdevice/by-name/boot;
+          BLOCK=/dev/block/by-name/boot;
           IS_SLOT_DEVICE=0;
           RAMDISK_COMPRESSION=auto;
           PATCH_VBMETA_FLAG=auto;
@@ -712,27 +882,35 @@ jobs:
           )
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: TRÍCH XUẤT LỖI THÔNG MINH (SMART ERROR PARSER)
+      - name: Smart error report
         if: ${{ failure() }}
         shell: bash
         run: |
           set +e
-          echo "::group::CHI TIẾT LỖI (Bấm vào đây để xem)"
+          echo "::group::compile-errors"
           for f in ./*.log; do
             [ -f "$f" ] || continue
-            ERR_LINES=$(grep -nEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "$f" | tail -n 20)
+            ERR_LINES=$(grep -nEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "$f" | tail -n 40)
             if [ -n "$ERR_LINES" ]; then
-              echo "🔥 TÌM THẤY LỖI TRONG FILE: $(basename "$f")"
+              echo "FILE: $(basename "$f")"
               echo "$ERR_LINES"
             fi
           done
           echo "::endgroup::"
           {
-            echo "## ❌ Báo cáo Lỗi Biên Dịch (Smart Error Report)"
+            echo "## Compile Error Report"
             echo '```text'
-            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 40 || echo "Lấy 20 dòng cuối trong log."
+            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 80 || echo "No filtered error lines found."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload patched source tarball
+        if: ${{ success() && steps.srcpack.outputs.tar_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.srcpack.outputs.tar_name }}
+          path: ${{ github.workspace }}/${{ steps.srcpack.outputs.tar_name }}
+          if-no-files-found: error
 
       - name: Upload flashable AnyKernel3 zip
         if: ${{ success() }}
