@@ -372,6 +372,19 @@ jobs:
           #endif
           EOF
 
+          # === FIX TWA_RESUME & put_task_struct GLOBALLY (Samsung 5.4 compat) ===
+          echo "::notice::Force injecting task_work, sched/task.h and TWA_RESUME macro globally"
+          find -L KernelSU drivers/kernelsu -type f -name '*.c' 2>/dev/null | while IFS= read -r f; do
+            if grep -q 'put_task_struct' "$f"; then
+              grep -q '<linux/sched/task.h>' "$f" || sed -i '1i #include <linux/sched/task.h>' "$f"
+            fi
+            if grep -q 'TWA_RESUME' "$f"; then
+              grep -q '<linux/task_work.h>' "$f" || sed -i '1i #include <linux/task_work.h>' "$f"
+              grep -q '<linux/sched/task.h>' "$f" || sed -i '1i #include <linux/sched/task.h>' "$f"
+              grep -q '#define TWA_RESUME' "$f" || sed -i '1i #ifndef TWA_RESUME\n#define TWA_RESUME 1\n#endif' "$f"
+            fi
+          done
+
           # === FIX link-time unresolved KSU/manual-hook symbols on Samsung 5.4 ===
           echo "::notice::Force-linking legacy manual-hook symbols directly inside supercall.c"
           while IFS= read -r f; do
