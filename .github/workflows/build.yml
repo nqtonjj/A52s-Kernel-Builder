@@ -254,18 +254,24 @@ jobs:
             git -C KernelSU checkout "${SUKISU_REF}"
           }
 
-          if [ -x KernelSU/kernel/setup.sh ]; then
-            bash KernelSU/kernel/setup.sh "${SUKISU_REF}" || true
-          fi
-
+          # NON-GKI / built-in manual integration
+          # KHÔNG dùng setup.sh vì script này truyền commit hash dễ gây lỗi.
+          # Tự động chèn Kconfig/Makefile thủ công như dưới đây:
           test -d KernelSU/kernel
+          test -f KernelSU/kernel/Makefile
+          test -f KernelSU/kernel/Kconfig
+
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
 
           sed -i '/kernelsu\//d' drivers/Makefile
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
 
           sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
-          sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          if grep -q '^endmenu$' drivers/Kconfig; then
+            sed -i '/^endmenu$/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          else
+            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
+          fi
 
           git -C KernelSU rev-parse HEAD | tee "${GITHUB_WORKSPACE}/sukisu_commit.txt"
 
@@ -960,13 +966,6 @@ jobs:
           grep -E 'CONFIG_KSU|CONFIG_KPM|CONFIG_KPROBES|KALLSYMS|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
           echo "::endgroup::"
 
-      - name: Disable -Werror to prevent false build failures
-        if: ${{ success() }}
-        shell: bash
-        run: |
-          cd kernel
-          sed -i '/^KBUILD_CFLAGS/ s/$/ -Wno-error/' Makefile
-
       - name: Build kernel
         id: build
         shell: bash
@@ -1009,14 +1008,42 @@ jobs:
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
+            COMMON_ARGS=(
+              -C "$PWD"
+              O="$out_dir"
+              ARCH="$ARCH"
+              LLVM="$llvm_flag"
+              LLVM_IAS="$ias_flag"
+              CC="$cc_bin"
+              LD="$ld_bin"
+              HOSTCC="$hostcc_bin"
+              HOSTCXX="g++ -fuse-ld=bfd"
+              HOSTAR="ar"
+              HOSTLD="/usr/bin/ld.bfd"
+              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin"
+              HOSTCFLAGS="-Wno-error"
+              HOSTCXXFLAGS="-Wno-error"
+              KCFLAGS="-Wno-error -Wno-unused-function"
+              KCPPFLAGS="-Wno-error"
+              AR="${LLVM_PREFIX}llvm-ar"
+              NM="${LLVM_PREFIX}llvm-nm"
+              OBJCOPY="${LLVM_PREFIX}llvm-objcopy"
+              OBJDUMP="${LLVM_PREFIX}llvm-objdump"
+              READELF="${LLVM_PREFIX}llvm-readelf"
+              STRIP="${LLVM_PREFIX}llvm-strip"
+              CLANG_TRIPLE="aarch64-linux-gnu-"
+              CROSS_COMPILE="$CROSS_COMPILE"
+              CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
+            )
+
             set +e
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+            stdbuf -oL -eL make "${COMMON_ARGS[@]}" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
             BUILD_RC="${PIPESTATUS[0]}"
             set -e
             [ "${BUILD_RC}" -eq 0 ] || return "${BUILD_RC}"
 
             set +e
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" KCFLAGS="-Wno-error -Wno-unused-function" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
+            stdbuf -oL -eL make "${COMMON_ARGS[@]}" -j"$(nproc --all)" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
             BUILD_RC="${PIPESTATUS[0]}"
             set -e
             return "${BUILD_RC}"
