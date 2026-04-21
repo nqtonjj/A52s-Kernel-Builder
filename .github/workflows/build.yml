@@ -64,7 +64,7 @@ jobs:
       ANDROID_MAJOR_VERSION: u
       PLATFORM_VERSION: "16"
       TARGET_BUILD_VARIANT: user
-      KERNEL_REPO: https://github.com/JingMatrix/samsung_sm7325
+      KERNEL_REPO: https://github.com/RisenID/kernel_samsung_ascendia_sm7325
       ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
       SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
       SUKISU_REF: 911b075
@@ -78,7 +78,7 @@ jobs:
       - name: Checkout workflow repository
         uses: actions/checkout@v4
 
-      - name: Free up disk space aggressively
+      - name: Free up disk space aggressively (22GB Goal)
         shell: bash
         run: |
           set -euxo pipefail
@@ -128,10 +128,10 @@ jobs:
 
           AVAILABLE_GB="$(df --output=avail -BG / | tail -n1 | tr -dc '0-9')"
           echo "Available disk after cleanup: ${AVAILABLE_GB}GB"
-          if [ "${AVAILABLE_GB}" -lt 18 ]; then
-            echo "::warning::Disk after cleanup is below 18GB. Build may still work but margin is lower than ideal."
+          if [ "${AVAILABLE_GB}" -lt 22 ]; then
+            echo "::warning::Disk after cleanup is below 22GB. Build may still work but margin is lower than the Holy 4th Law ideal."
           else
-            echo "::notice::Disk cleanup succeeded with ${AVAILABLE_GB}GB available."
+            echo "::notice::Disk cleanup succeeded with ${AVAILABLE_GB}GB available. Conforming to the Holy 4th Law."
           fi
 
           echo "::group::disk-after"
@@ -192,7 +192,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v20" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v21" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -204,7 +204,7 @@ jobs:
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
             ${{ runner.os }}-ccache-sm7325-
 
-      - name: Clone JingMatrix kernel source
+      - name: Clone A52s kernel source
         shell: bash
         run: |
           set -euxo pipefail
@@ -645,8 +645,6 @@ jobs:
           __attribute__((weak)) long ksu_handle_execveat(void) { return 0; }
           __attribute__((weak)) long ksu_handle_devpts(void) { return 0; }
           __attribute__((weak)) long ksu_input_hook(void) { return 0; }
-          __attribute__((weak)) long path_umount(void) { return -38; }
-          __attribute__((weak)) long path_mount(void) { return -38; }
           EOF
 
           for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
@@ -659,6 +657,124 @@ jobs:
           grep -RIn 'ksu_compat_linkfix\.o' KernelSU drivers/kernelsu 2>/dev/null || true
           grep -RInE 'escape_to_root_for_init|escape_with_root_profile|apply_kernelsu_rules|handle_sepolicy' KernelSU drivers/kernelsu 2>/dev/null || true
           echo "::endgroup::"
+
+      - name: Apply SukiSU manual hook patches for non-GKI
+        if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/04d-sukisu-manual-hooks.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+
+          echo "::notice::Applying manual hook patches to fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, drivers/input/input.c, fs/devpts/inode.c, and fs/namespace.c"
+
+          python3 - <<'EOF'
+          import os
+          from pathlib import Path
+
+          def patch_file(filepath, replacements):
+              p = Path(filepath)
+              if not p.exists(): return
+              s = p.read_text()
+              original = s
+              for old, new in replacements:
+                  if old in s and '#ifdef CONFIG_KSU' not in new:
+                      s = s.replace(old, new)
+                  elif old in s and '#ifdef CONFIG_KSU' in new and '#ifdef CONFIG_KSU' not in s[max(0, s.find(old)-60):s.find(old)]:
+                      s = s.replace(old, new)
+              if s != original:
+                  p.write_text(s)
+                  print(f"Patched {filepath}")
+
+          patch_file('fs/exec.c', [
+              ('static int do_execveat_common(int fd, struct filename *filename,', 
+               '#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\nstatic int do_execveat_common(int fd, struct filename *filename,'),
+              ('return __do_execve_file(fd, filename, argv, envp, flags, NULL);',
+               '#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);')
+          ])
+
+          patch_file('fs/open.c', [
+              ('long do_faccessat(int dfd, const char __user *filename, int mode)',
+               '#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\nlong do_faccessat(int dfd, const char __user *filename, int mode)'),
+              ('if (mode & ~S_IRWXO)',
+               '#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\tif (mode & ~S_IRWXO)')
+          ])
+
+          patch_file('fs/read_write.c', [
+              ('ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)',
+               '#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\nssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)'),
+              ('if (!(file->f_mode & FMODE_READ))',
+               '#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n\n\tif (!(file->f_mode & FMODE_READ))')
+          ])
+
+          patch_file('fs/stat.c', [
+              ('int vfs_statx(int dfd, const char __user *filename, int flags,',
+               '#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\nint vfs_statx(int dfd, const char __user *filename, int flags,'),
+              ('int vfs_fstatat(int dfd, const char __user *filename, struct kstat *stat,',
+               '#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\nint vfs_fstatat(int dfd, const char __user *filename, struct kstat *stat,'),
+              ('unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;',
+               'unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;\n#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flags);\n#endif'),
+              ('unsigned int lookup_flags = 0;',
+               'unsigned int lookup_flags = 0;\n#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif')
+          ])
+
+          patch_file('drivers/input/input.c', [
+              ('static void input_handle_event(struct input_dev *dev,',
+               '#ifdef CONFIG_KSU\nextern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif\nstatic void input_handle_event(struct input_dev *dev,'),
+              ('int disposition = input_get_disposition(dev, type, code, &value);',
+               'int disposition = input_get_disposition(dev, type, code, &value);\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_input_hook))\n\t\tksu_handle_input_handle_event(&type, &code, &value);\n#endif')
+          ])
+
+          patch_file('fs/devpts/inode.c', [
+              ('void *devpts_get_priv(struct dentry *dentry)',
+               '#ifdef CONFIG_KSU\nextern int ksu_handle_devpts(struct inode*);\n#endif\nvoid *devpts_get_priv(struct dentry *dentry)'),
+              ('if (dentry->d_sb->s_magic != DEVPTS_SUPER_MAGIC)',
+               '#ifdef CONFIG_KSU\n\tksu_handle_devpts(dentry->d_inode);\n#endif\n\n\tif (dentry->d_sb->s_magic != DEVPTS_SUPER_MAGIC)')
+          ])
+
+          umount_code = """
+          #ifdef CONFIG_KSU
+          static int can_umount(const struct path *path, int flags)
+          {
+              struct mount *mnt = real_mount(path->mnt);
+              if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
+                  return -EINVAL;
+              if (!may_mount())
+                  return -EPERM;
+              if (path->dentry != path->mnt->mnt_root)
+                  return -EINVAL;
+              if (!check_mnt(mnt))
+                  return -EINVAL;
+              if (mnt->mnt.mnt_flags & MNT_LOCKED)
+                  return -EINVAL;
+              if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
+                  return -EPERM;
+              return 0;
+          }
+
+          int path_umount(struct path *path, int flags)
+          {
+              struct mount *mnt = real_mount(path->mnt);
+              int ret;
+              ret = can_umount(path, flags);
+              if (!ret)
+                  ret = do_umount(mnt, flags);
+              dput(path->dentry);
+              mntput_no_expire(mnt);
+              return ret;
+          }
+          #endif
+          """
+          
+          p_ns = Path('fs/namespace.c')
+          if p_ns.exists():
+              s_ns = p_ns.read_text()
+              if 'int path_umount(' not in s_ns:
+                  s_ns += "\n" + umount_code
+                  p_ns.write_text(s_ns)
+                  print("Patched fs/namespace.c with path_umount backport")
+          EOF
 
       - name: Apply optional guarded touchscreen DEFEX stub
         if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
@@ -824,23 +940,15 @@ jobs:
           disable_cfg CONFIG_KPM
           disable_cfg CONFIG_KSU_DEBUG
 
-          disable_cfg CONFIG_SECURITY_DEFEX_RESTRICT_FILE
-          disable_cfg CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL
-          disable_cfg CONFIG_SEC_RESTRICT_SETUID
-          disable_cfg CONFIG_SEC_RESTRICT_ROOTING
-
-          disable_cfg CONFIG_KNOX
-          disable_cfg CONFIG_KNOX_GUARD
-
-          if grep -q '^CONFIG_SECURITY_DEFEX=' "$DEFCONFIG"; then
-            sed -i 's/^CONFIG_SECURITY_DEFEX=.*/CONFIG_SECURITY_DEFEX=y/' "$DEFCONFIG"
-          elif ! grep -q '^CONFIG_SECURITY_DEFEX=y$' "$DEFCONFIG"; then
-            printf 'CONFIG_SECURITY_DEFEX=y\n' >> "$DEFCONFIG"
-          fi
-
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
             echo "::warning::Aggressive mode: Strip Samsung security branches"
             for key in \
+              CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
+              CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
+              CONFIG_SEC_RESTRICT_SETUID \
+              CONFIG_SEC_RESTRICT_ROOTING \
+              CONFIG_KNOX \
+              CONFIG_KNOX_GUARD \
               CONFIG_SECURITY_PROCA \
               CONFIG_PROCA \
               CONFIG_RKP \
@@ -855,7 +963,7 @@ jobs:
               disable_cfg "$key"
             done
           else
-            echo "::notice::Minimal mode: Keep security core to prioritize boot"
+            echo "::notice::Minimal mode: Keep ALL stock Samsung security configurations (KNOX, TIMA, DEFEX, etc.)"
           fi
 
           echo "::group::Defconfig flags ($PROFILE)"
@@ -883,6 +991,7 @@ jobs:
           cd "${GITHUB_WORKSPACE}/kernel"
 
           mkdir -p "$CCACHE_DIR"
+          export USE_CCACHE=1
           ccache -M 8G || true
           ccache -z || true
 
@@ -932,7 +1041,18 @@ jobs:
             exit 1
           fi
 
-          test -f "${OUT_DIR}/arch/arm64/boot/Image"
+          if [ ! -s "${OUT_DIR}/arch/arm64/boot/Image" ]; then
+            echo "::error::Kernel Image was not generated or is empty!"
+            exit 1
+          fi
+
+          IMAGE_SIZE=$(stat -c%s "${OUT_DIR}/arch/arm64/boot/Image")
+          if [ "$IMAGE_SIZE" -lt 10000000 ]; then
+            echo "::error::Kernel Image is suspiciously small ($IMAGE_SIZE bytes)!"
+            exit 1
+          fi
+          echo "::notice::Kernel Image built successfully ($IMAGE_SIZE bytes)."
+
           EOF
 
           chmod +x "${GITHUB_WORKSPACE}/build-kernel.sh"
@@ -1024,17 +1144,12 @@ jobs:
           . tools/ak3-core.sh;
           split_boot;
 
-          if [ -f dtb ]; then
-            ui_print "Flashing custom DTB..."
-            dd if=dtb of=$BLOCK bs=1048576 seek=2 conv=notrunc 2>/dev/null || true
-          fi
-
+          flash_boot;
+          
           if [ -f dtbo.img ] && [ -e /dev/block/by-name/dtbo ]; then
             ui_print "Flashing DTBO..."
             dd if=dtbo.img of=/dev/block/by-name/dtbo bs=1048576 2>/dev/null || true
           fi
-
-          flash_boot;
           EOF
 
           cd ..
