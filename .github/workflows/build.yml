@@ -636,15 +636,6 @@ jobs:
           __attribute__((weak)) int update_groups_root_profile(void) { return 0; }
           __attribute__((weak)) int update_cap_root_profile(void) { return 0; }
           __attribute__((weak)) int update_root_profile(void) { return 0; }
-          
-          /* KSU_LEGACY_FORCE_LINK_STUBS */
-          __attribute__((weak)) long ksu_vfs_read_hook(void) { return 0; }
-          __attribute__((weak)) long ksu_handle_sys_read(void) { return 0; }
-          __attribute__((weak)) long ksu_execveat_hook(void) { return 0; }
-          __attribute__((weak)) long ksu_handle_execveat_sucompat(void) { return 0; }
-          __attribute__((weak)) long ksu_handle_execveat(void) { return 0; }
-          __attribute__((weak)) long ksu_handle_devpts(void) { return 0; }
-          __attribute__((weak)) long ksu_input_hook(void) { return 0; }
           EOF
 
           for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
@@ -657,6 +648,99 @@ jobs:
           grep -RIn 'ksu_compat_linkfix\.o' KernelSU drivers/kernelsu 2>/dev/null || true
           grep -RInE 'escape_to_root_for_init|escape_with_root_profile|apply_kernelsu_rules|handle_sepolicy' KernelSU drivers/kernelsu 2>/dev/null || true
           echo "::endgroup::"
+
+      - name: Apply optional guarded touchscreen DEFEX stub
+        if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/04c-touch-defex-stub.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+
+          echo "::notice::Applying guarded DEFEX stub only to touchscreen driver call-sites"
+          find drivers/input/touchscreen -type f -name '*.c' 2>/dev/null \
+            | while IFS= read -r f; do
+                grep -qE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' "$f" || continue
+                sed -i \
+                  -e 's/task_defex_syscall_catch([^;)]*)/0/g' \
+                  -e 's/defex_check([^;)]*)/0/g' \
+                  -e 's/five_check([^;)]*)/0/g' \
+                  -e 's/defex_allow([^;)]*)/0/g' \
+                  "$f"
+                echo "stubbed: $f"
+              done
+
+      - name: Materialize SUSFS kernel-side patchset
+        if: ${{ github.event.inputs.feature_profile == 'full' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+
+          rm -rf ../susfs4ksu
+          git clone --depth=1 --filter=blob:none -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
+          cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+          cp -fv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+
+          SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
+          test -n "${SUSFS_KERNEL_PATCH}"
+
+          auto_fix_fd_proc_reject() {
+            local rej="fs/proc/fd.c.rej"
+            local target="fs/proc/fd.c"
+            [ -f "$rej" ] || return 0
+            if ! grep -q 'susfs_fd_link' "$target"; then
+              if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
+                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+          #endif
+                }' "$target"
+              elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "$target"; then
+                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+          #endif
+                }' "$target"
+              else
+                return 1
+              fi
+            fi
+            if ! grep -q '#include <linux/susfs.h>' "$target"; then
+              sed -i '/^#include <linux\/fs.h>/a #include <linux/susfs.h>' "$target" || sed -i '1i #include <linux/susfs.h>' "$target"
+            fi
+            rm -f "$rej"
+            return 0
+          }
+
+          if git apply --check --unsafe-paths "$SUSFS_KERNEL_PATCH" >/dev/null 2>&1; then
+            git apply --unsafe-paths "$SUSFS_KERNEL_PATCH"
+          else
+            set +e
+            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
+            PATCH_RC=${PIPESTATUS[0]}
+            set -e
+            auto_fix_fd_proc_reject || true
+
+            REJ_COUNT="$(find . -name '*.rej' | wc -l | tr -d ' ')"
+            if [ "$REJ_COUNT" != "0" ]; then
+              echo "::warning::${REJ_COUNT} .rej file(s) remain. These are mostly optional features deviating from Samsung source. Force-wiping to proceed safely."
+              find . -name '*.rej' -delete
+            fi
+          fi
+
+          grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
+          test -f include/linux/susfs.h
+          test -f fs/susfs.c
+          
+          # Đảm bảo susfs.o được biên dịch trong fs/Makefile
+          grep -q 'susfs\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+          echo "::notice::SUSFS Makefile entry verified."
 
       - name: Apply SukiSU manual hook patches for non-GKI
         if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
@@ -776,108 +860,6 @@ jobs:
                   print("Patched fs/namespace.c with path_umount backport")
           EOF
 
-      - name: Apply optional guarded touchscreen DEFEX stub
-        if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04c-touch-defex-stub.log"
-          exec > >(tee -a "${LOG}") 2>&1
-          cd kernel
-
-          echo "::notice::Applying guarded DEFEX stub only to touchscreen driver call-sites"
-          find drivers/input/touchscreen -type f -name '*.c' 2>/dev/null \
-            | while IFS= read -r f; do
-                grep -qE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' "$f" || continue
-                sed -i \
-                  -e 's/task_defex_syscall_catch([^;)]*)/0/g' \
-                  -e 's/defex_check([^;)]*)/0/g' \
-                  -e 's/five_check([^;)]*)/0/g' \
-                  -e 's/defex_allow([^;)]*)/0/g' \
-                  "$f"
-                echo "stubbed: $f"
-              done
-
-      - name: Materialize SUSFS kernel-side patchset
-        if: ${{ github.event.inputs.feature_profile == 'full' }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
-          exec > >(tee -a "${LOG}") 2>&1
-          cd kernel
-
-          rm -rf ../susfs4ksu
-          git clone --depth=1 --filter=blob:none -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
-          cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
-          cp -fv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
-
-          SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
-          test -n "${SUSFS_KERNEL_PATCH}"
-
-          auto_fix_fd_proc_reject() {
-            local rej="fs/proc/fd.c.rej"
-            local target="fs/proc/fd.c"
-            [ -f "$rej" ] || return 0
-            if ! grep -q 'susfs_fd_link' "$target"; then
-              if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
-                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS\
-          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
-          #endif
-                }' "$target"
-              elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "$target"; then
-                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS\
-          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
-          #endif
-                }' "$target"
-              else
-                return 1
-              fi
-            fi
-            if ! grep -q '#include <linux/susfs.h>' "$target"; then
-              sed -i '/^#include <linux\/fs.h>/a #include <linux/susfs.h>' "$target" || sed -i '1i #include <linux/susfs.h>' "$target"
-            fi
-            rm -f "$rej"
-            return 0
-          }
-
-          drop_optional_susfs_rejects() {
-            for rej in fs/exec.c.rej fs/devpts/inode.c.rej fs/namespace.c.rej fs/overlayfs/readdir.c.rej fs/proc/task_mmu.c.rej include/linux/mount.h.rej; do
-              if [ -f "$rej" ]; then
-                echo "::warning::SUSFS patch partially failed for $(basename "$rej" .rej). SUSFS features may be incomplete."
-                rm -f "$rej"
-              fi
-            done
-            return 0
-          }
-
-          if git apply --check --unsafe-paths "$SUSFS_KERNEL_PATCH" >/dev/null 2>&1; then
-            git apply --unsafe-paths "$SUSFS_KERNEL_PATCH"
-          else
-            set +e
-            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
-            PATCH_RC=${PIPESTATUS[0]}
-            set -e
-            auto_fix_fd_proc_reject || exit 1
-            drop_optional_susfs_rejects
-            REJ_COUNT="$(find . -name '*.rej' | wc -l | tr -d ' ')"
-            if [ "$REJ_COUNT" != "0" ]; then
-              exit 1
-            fi
-          fi
-
-          grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
-          test -f include/linux/susfs.h
-          test -f fs/susfs.c
-          
-          # Đảm bảo susfs.o được biên dịch trong fs/Makefile
-          grep -q 'susfs\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
-          echo "::notice::SUSFS Makefile entry verified."
-
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
         run: |
@@ -901,13 +883,15 @@ jobs:
 
           for key in \
             CONFIG_KSU \
+            CONFIG_KSU_MANUAL_HOOK \
             CONFIG_KSU_MANUAL_SU \
             CONFIG_KSU_SUSFS \
             CONFIG_KSU_TRACEPOINT_HOOK \
             CONFIG_KSU_NONE_HOOK \
             CONFIG_KSU_DEBUG \
             CONFIG_KPM \
-            CONFIG_KALLSYMS_ALL
+            CONFIG_KALLSYMS_ALL \
+            CONFIG_KPROBES
           do
             disable_cfg "$key"
           done
@@ -916,20 +900,26 @@ jobs:
 
           case "$PROFILE" in
             baseline_noroot)
-              echo "::warning::Profile=baseline_noroot -> Disable KSU/SUSFS"
+              echo "::warning::Profile baseline_noroot selected. KernelSU and SUSFS remain disabled."
               ;;
             ksu_nosusfs)
-              echo "::warning::Profile=ksu_nosusfs -> Enable KSU only"
+              echo "::warning::Profile ksu_nosusfs selected. Enabling manual-hook KernelSU without SUSFS."
               enable_cfg CONFIG_KSU
-              enable_cfg CONFIG_KSU_NONE_HOOK
+              enable_cfg CONFIG_KSU_MANUAL_HOOK
+              enable_cfg CONFIG_KSU_MANUAL_SU
+              disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
+              disable_cfg CONFIG_KSU_NONE_HOOK
+              disable_cfg CONFIG_KPROBES
               ;;
             full)
-              echo "::warning::Profile=full -> Enable KSU manual-su + SUSFS"
+              echo "::warning::Profile full selected. Enabling manual-hook KernelSU with SUSFS."
               enable_cfg CONFIG_KSU
+              enable_cfg CONFIG_KSU_MANUAL_HOOK
               enable_cfg CONFIG_KSU_MANUAL_SU
               enable_cfg CONFIG_KSU_SUSFS
               disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
               disable_cfg CONFIG_KSU_NONE_HOOK
+              disable_cfg CONFIG_KPROBES
               ;;
             *)
               echo "::error::Unknown feature_profile=$PROFILE"
@@ -967,7 +957,7 @@ jobs:
           fi
 
           echo "::group::Defconfig flags ($PROFILE)"
-          grep -E 'CONFIG_KSU|CONFIG_KPM|KALLSYMS|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
+          grep -E 'CONFIG_KSU|CONFIG_KPM|CONFIG_KPROBES|KALLSYMS|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
           echo "::endgroup::"
 
       - name: Disable -Werror to prevent false build failures
