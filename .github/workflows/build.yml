@@ -303,24 +303,6 @@ jobs:
             echo "::notice::SukiSU version appears to fully support SUSFS."
           fi
 
-      - name: Export sys_call_table for Samsung 5.4 Manual Hook
-        if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd kernel
-          echo "::notice::Ensuring sys_call_table is exported for KSU Manual Hook"
-          
-          if grep -q 'EXPORT_SYMBOL.*sys_call_table' kernel/kallsyms.c || grep -q 'EXPORT_SYMBOL.*sys_call_table' kernel/sys.c; then
-            echo "::notice::sys_call_table is already exported."
-          else
-            echo "::notice::Injecting EXPORT_SYMBOL(sys_call_table) into kernel/sys.c"
-            if ! grep -q '#include <linux/export.h>' kernel/sys.c; then
-              sed -i '/^#include/ a #include <linux/export.h>' kernel/sys.c
-            fi
-            echo 'EXPORT_SYMBOL(sys_call_table);' >> kernel/sys.c
-          fi
-
       - name: Apply non-interactive SukiSU compatibility patches
         if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
