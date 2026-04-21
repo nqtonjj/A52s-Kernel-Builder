@@ -192,7 +192,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v15
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v16
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -323,7 +323,25 @@ jobs:
             grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
           done < <(grep -RIlE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          echo "::notice::Patching allowlist task_work API for Samsung Linux 5.4"
+          # ============================================================
+          # GLOBAL TWA_RESUME COMPAT — Samsung 5.4 không có
+          # enum task_work_notify_mode. task_work_add() nhận bool notify.
+          # TWA_NONE=0 (false), TWA_RESUME=1 (true), TWA_SIGNAL=1 (true).
+          # Phải patch TOÀN BỘ KernelSU, không chỉ allowlist.c.
+          # ============================================================
+          echo "::notice::Global TWA_RESUME/TWA_SIGNAL compat for Samsung 5.4 (bool notify, no enum)"
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            sed -i \
+              -e 's/\bTWA_RESUME\b/1/g' \
+              -e 's/\bTWA_SIGNAL\b/1/g' \
+              -e 's/\bTWA_SIGNAL_NO_IPI\b/1/g' \
+              -e 's/\bTWA_NONE\b/0/g' \
+              "$f"
+            echo "  TWA-patched: $f"
+          done < <(grep -RIlE '\bTWA_RESUME\b|\bTWA_SIGNAL\b|\bTWA_SIGNAL_NO_IPI\b|\bTWA_NONE\b' KernelSU drivers/kernelsu 2>/dev/null || true)
+
+          echo "::notice::Patching global task_work API for Samsung Linux 5.4"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
@@ -334,23 +352,36 @@ jobs:
           s = p.read_text()
           original = s
 
-          if 'TWA_RESUME' in s:
-              s = s.replace('TWA_RESUME', '1')
+          need_task_work = 'task_work_add(' in s or 'init_task_work(' in s
+          need_sched_task = 'put_task_struct' in s
 
-          if 'put_task_struct' in s and '#include <linux/sched/task.h>' not in s:
-              lines = s.splitlines()
-              insert_at = 0
-              for i, line in enumerate(lines):
-                  if line.startswith('#include '):
-                      insert_at = i + 1
-              lines.insert(insert_at, '#include <linux/sched/task.h>')
+          lines = s.splitlines()
+          insert_at = 0
+          for i, line in enumerate(lines):
+              if line.startswith('#include '):
+                  insert_at = i + 1
+
+          to_add = []
+          if need_task_work and '#include <linux/task_work.h>' not in s:
+              to_add.append('#include <linux/task_work.h>')
+          if need_sched_task and '#include <linux/sched/task.h>' not in s:
+              to_add.append('#include <linux/sched/task.h>')
+
+          if to_add:
+              for inc in reversed(to_add):
+                  lines.insert(insert_at, inc)
               s = '\n'.join(lines) + '\n'
 
           if s != original:
               p.write_text(s)
           PY
-            echo "patched allowlist legacy API: $f"
-          done < <(find -L KernelSU drivers/kernelsu -path '*/policy/allowlist.c' -type f 2>/dev/null)
+            echo "patched global legacy API: $f"
+          done < <(grep -RIlE --include='*.c' --include='*.h' 'task_work_add|init_task_work|put_task_struct' KernelSU drivers/kernelsu 2>/dev/null || true)
+
+          echo "::group::verify-taskwork-compat"
+          grep -RIn 'TWA_RESUME' KernelSU drivers/kernelsu 2>/dev/null || true
+          grep -RIn 'task_work_add' KernelSU drivers/kernelsu 2>/dev/null || true
+          echo "::endgroup::"
 
           mkdir -p include/linux/log
           cat > include/linux/log/perflog.h <<'EOF'
@@ -790,11 +821,10 @@ jobs:
           export LLVM_PREFIX="${TC_DIR}/clang-primary/bin/"
           export KBUILD_BUILD_USER="samsung"
           export KBUILD_BUILD_HOST="localbuild"
-          
-          # Fix Vermagic mismatch by strictly using defconfig's LOCALVERSION
+
           STOCK_LV="$(grep '^CONFIG_LOCALVERSION=' "arch/arm64/configs/vendor/${DEFCONFIG}" | cut -d= -f2 | tr -d '"' || true)"
           export LOCALVERSION="${STOCK_LV:-}"
-          
+
           export CROSS_COMPILE="aarch64-linux-gnu-"
           export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
 
