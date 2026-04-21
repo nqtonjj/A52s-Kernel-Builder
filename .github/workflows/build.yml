@@ -32,7 +32,7 @@ on:
         description: "Boot triage profile"
         required: true
         type: choice
-        default: "ksu_nosusfs"
+        default: "full"
         options:
           - baseline_noroot
           - ksu_nosusfs
@@ -192,7 +192,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v16
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v18
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -435,161 +435,39 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          echo "::notice::Patching dispatch.c with rwlock-safe compat"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            python3 - "$f" <<'PY'
-          from pathlib import Path
-          import sys
-          import re
+          echo "::notice::Injecting dedicated link-fix object for stripped SukiSU exports"
+          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
+          [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
 
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          original = s
-
-          def ensure_include(text: str, header: str) -> str:
-              inc = f'#include <{header}>'
-              if inc in text:
-                  return text
-              lines = text.splitlines()
-              insert_at = 0
-              for idx, line in enumerate(lines):
-                  if line.startswith('#include '):
-                      insert_at = idx + 1
-              lines.insert(insert_at, inc)
-              return '\n'.join(lines) + '\n'
-
-          for h in (
-              'linux/sched.h',
-              'linux/sched/task.h',
-              'linux/sched/signal.h',
-              'linux/rwlock.h',
-          ):
-              s = ensure_include(s, h)
-
-          # Dọn dẹp sạch sẽ các tàn dư patch lỗi cũ
-          s = re.sub(r'(?ms)\n?/\* KSU_SM7325_DISPATCH_COMPAT_BEGIN \*/.*?/\* KSU_SM7325_DISPATCH_COMPAT_END \*/\n?', '\n', s)
-
-          marker = '/* KSU_SM7325_DISPATCH_COMPAT_BEGIN */'
-          if marker not in s:
-              lines = s.splitlines()
-              insert_at = 0
-              for idx, line in enumerate(lines):
-                  if line.startswith('#include '):
-                      insert_at = idx + 1
-
-              # Tiêm RWLOCK chuẩn mực, không đè macro read_lock
-              block = [
-                  '/* KSU_SM7325_DISPATCH_COMPAT_BEGIN */',
-                  '#ifndef KSU_SM7325_DISPATCH_COMPAT',
-                  '#define KSU_SM7325_DISPATCH_COMPAT',
-                  'static DEFINE_RWLOCK(ksu_compat_tasklist_lock);',
-                  '#define tasklist_lock ksu_compat_tasklist_lock',
-                  'static struct task_struct ksu_compat_init_task;',
-                  '#define init_task ksu_compat_init_task',
-                  '#ifndef task_pgrp',
-                  '#define task_pgrp(task) ((void)(task), 0)',
-                  '#endif',
-                  '#ifndef task_session',
-                  '#define task_session(task) ((void)(task), 0)',
-                  '#endif',
-                  '#endif',
-                  '/* KSU_SM7325_DISPATCH_COMPAT_END */',
-              ]
-              lines[insert_at:insert_at] = block
-              s = '\n'.join(lines) + '\n'
-
-          if s != original:
-              p.write_text(s)
-          PY
-            echo "patched dispatch.c (rwlock-safe): $f"
-          done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
-
-          echo "::notice::Stubbing optional manager/policy files"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
+          cat > "${KSU_REAL_DIR}/ksu_compat_linkfix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
-          int ksu_observer_init(void) { return 0; }
-          void ksu_observer_exit(void) {}
-          int ksu_fsnotify_init(void) { return 0; }
-          void ksu_fsnotify_exit(void) {}
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          int ksu_app_profile_init(void) { return 0; }
-          void ksu_app_profile_exit(void) {}
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
+          /*
+           * Samsung SM7325 / Linux 5.4 compatibility link-fix object.
+           * These symbols are referenced by newer SukiSU code paths but may be
+           * lost when policy / sepolicy / app_profile sources are stubbed for
+           * older Samsung kernels.
+           *
+           * Keep them weak so upstream strong definitions, if present later,
+           * automatically override these compatibility fallbacks.
+           */
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          int ksu_rules_init(void) { return 0; }
-          void ksu_rules_exit(void) {}
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
+          __attribute__((weak)) int escape_to_root_for_init(void) { return 0; }
+          __attribute__((weak)) int escape_with_root_profile(void) { return 0; }
+          __attribute__((weak)) int apply_kernelsu_rules(void) { return 0; }
+          __attribute__((weak)) int handle_sepolicy(void) { return 0; }
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          #include "sepolicy.h"
-          struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol) { return old_pol; }
-          void ksu_destroy_sepolicy(struct selinux_policy *orig) { (void)orig; }
-          bool ksu_type(struct policydb *db, const char *name, const char *attr) { return true; }
-          bool ksu_attribute(struct policydb *db, const char *name) { return true; }
-          bool ksu_permissive(struct policydb *db, const char *type) { return true; }
-          bool ksu_enforce(struct policydb *db, const char *type) { return true; }
-          bool ksu_typeattribute(struct policydb *db, const char *type, const char *attr) { return true; }
-          bool ksu_exists(struct policydb *db, const char *type) { return false; }
-          bool ksu_allow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
-          bool ksu_deny(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
-          bool ksu_auditallow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
-          bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
-          bool ksu_allowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
-          bool ksu_auditallowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
-          bool ksu_dontauditxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
-          bool ksu_type_transition(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def, const char *obj) { return true; }
-          bool ksu_type_change(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return true; }
-          bool ksu_type_member(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return true; }
-          bool ksu_genfscon(struct policydb *db, const char *fs_name, const char *path, const char *ctx) { return true; }
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
-
-          echo "::notice::Injecting minmax.h"
-          mkdir -p include/linux
-          cat > include/linux/minmax.h <<'EOF'
-          #ifndef _LINUX_MINMAX_H
-          #define _LINUX_MINMAX_H
-          #ifndef min
-          #define min(x, y) ({ typeof(x) _min1 = (x); typeof(y) _min2 = (y); (void) (&_min1 == &_min2); _min1 < _min2 ? _min1 : _min2; })
-          #endif
-          #ifndef max
-          #define max(x, y) ({ typeof(x) _max1 = (x); typeof(y) _max2 = (y); (void) (&_max1 == &_max2); _max1 > _max2 ? _max1 : _max2; })
-          #endif
-          #ifndef clamp
-          #define clamp(val, lo, hi) min(max(val, lo), hi)
-          #endif
-          #endif
-          EOF
-
-          echo "::notice::Force-linking legacy manual-hook symbols"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            python3 - "$f" <<'PY'
-          from pathlib import Path
-          import sys
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          marker = '/* KSU_LEGACY_FORCE_LINK_STUBS */'
-          if marker not in s:
-              s += r"""
+          /*
+           * Pre-emptive safety net for nearby optional profile / policy paths.
+           * These are kept weak and generic on purpose.
+           */
+          __attribute__((weak)) int update_uid_root_profile(void) { return 0; }
+          __attribute__((weak)) int update_gid_root_profile(void) { return 0; }
+          __attribute__((weak)) int update_sid_root_profile(void) { return 0; }
+          __attribute__((weak)) int update_groups_root_profile(void) { return 0; }
+          __attribute__((weak)) int update_cap_root_profile(void) { return 0; }
+          __attribute__((weak)) int update_root_profile(void) { return 0; }
+          
           /* KSU_LEGACY_FORCE_LINK_STUBS */
           __attribute__((weak)) long ksu_vfs_read_hook(void) { return 0; }
           __attribute__((weak)) long ksu_handle_sys_read(void) { return 0; }
@@ -600,10 +478,18 @@ jobs:
           __attribute__((weak)) long ksu_input_hook(void) { return 0; }
           __attribute__((weak)) long path_umount(void) { return -38; }
           __attribute__((weak)) long path_mount(void) { return -38; }
-          """
-              p.write_text(s)
-          PY
-          done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/supercall.c' -type f 2>/dev/null)
+          EOF
+
+          for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
+            [ -f "$mk" ] || continue
+            grep -q 'ksu_compat_linkfix\.o' "$mk" || printf '\nobj-$(CONFIG_KSU) += ksu_compat_linkfix.o\n' >> "$mk"
+          done
+
+          echo "::group::verify-linkfix"
+          ls -l "${KSU_REAL_DIR}/ksu_compat_linkfix.c" || true
+          grep -RIn 'ksu_compat_linkfix\.o' KernelSU drivers/kernelsu 2>/dev/null || true
+          grep -RInE 'escape_to_root_for_init|escape_with_root_profile|apply_kernelsu_rules|handle_sepolicy' KernelSU drivers/kernelsu 2>/dev/null || true
+          echo "::endgroup::"
 
       - name: Apply optional guarded touchscreen DEFEX stub
         if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
@@ -822,7 +708,8 @@ jobs:
           export KBUILD_BUILD_USER="samsung"
           export KBUILD_BUILD_HOST="localbuild"
 
-          STOCK_LV="$(grep '^CONFIG_LOCALVERSION=' "arch/arm64/configs/vendor/${DEFCONFIG}" | cut -d= -f2 | tr -d '"' || true)"
+          STOCK_LV="$(grep '^CONFIG_LOCALVERSION=' "arch/arm64/configs/vendor/${DEFCONFIG}" \
+            | cut -d= -f2 | tr -d '"' || true)"
           export LOCALVERSION="${STOCK_LV:-}"
 
           export CROSS_COMPILE="aarch64-linux-gnu-"
@@ -841,21 +728,45 @@ jobs:
             mkdir -p "$out_dir"
 
             set +e
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" ARCH="$ARCH" \
+              LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" \
+              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" \
+              HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
+              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
+              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
+              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
+              CLANG_TRIPLE="aarch64-linux-gnu-" \
+              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+              "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
             BUILD_RC="${PIPESTATUS[0]}"
             set -e
             [ "${BUILD_RC}" -eq 0 ] || return "${BUILD_RC}"
 
             set +e
-            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
+            stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" ARCH="$ARCH" \
+              LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" \
+              HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" \
+              HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" \
+              AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" \
+              OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" \
+              READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" \
+              CLANG_TRIPLE="aarch64-linux-gnu-" \
+              CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+              2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
             BUILD_RC="${PIPESTATUS[0]}"
             set -e
             return "${BUILD_RC}"
           }
 
-          if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
+          if build_once "proton-llvm" \
+              "ccache ${TC_DIR}/clang-primary/bin/clang" \
+              "${TC_DIR}/clang-primary/bin/ld.lld" \
+              "${LLVM_PREFIX}" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
             echo "toolchain=proton-llvm" >> "$GITHUB_OUTPUT"
-          elif build_once "proton-gas" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "0" "gcc -fuse-ld=bfd -B/usr/bin"; then
+          elif build_once "proton-gas" \
+              "ccache ${TC_DIR}/clang-primary/bin/clang" \
+              "${TC_DIR}/clang-primary/bin/ld.lld" \
+              "${LLVM_PREFIX}" "0" "gcc -fuse-ld=bfd -B/usr/bin"; then
             echo "toolchain=proton-gas" >> "$GITHUB_OUTPUT"
           else
             echo "::error::All toolchain attempts failed"
@@ -940,7 +851,9 @@ jobs:
           echo "::group::compile-errors"
           for f in ./*.log; do
             [ -f "$f" ] || continue
-            ERR_LINES=$(grep -nEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "$f" | tail -n 40)
+            ERR_LINES=$(grep -nEi \
+              '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' \
+              "$f" | tail -n 40)
             if [ -n "$ERR_LINES" ]; then
               echo "FILE: $(basename "$f")"
               echo "$ERR_LINES"
@@ -950,7 +863,9 @@ jobs:
           {
             echo "## Compile Error Report"
             echo '```text'
-            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 80 || echo "No filtered error lines found."
+            grep -hEi \
+              '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' \
+              ./*.log | tail -n 80 || echo "No filtered error lines found."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
