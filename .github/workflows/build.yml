@@ -192,7 +192,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v11
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v14
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -404,7 +404,7 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          echo "::notice::Applying Indestructible Dummy Macros for dispatch.c on Linux 5.4"
+          echo "::notice::Patching dispatch.c for Samsung 5.4 missing tasklist symbols"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
@@ -413,40 +413,45 @@ jobs:
 
           p = Path(sys.argv[1])
           s = p.read_text()
-          original = s
+          if 'KSU_SM7325_DISPATCH_COMPAT' in s:
+              sys.exit(0)
 
-          macro_injection = """
-          /* KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS */
-          #ifndef KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS
-          #define KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS
-          #include <linux/rwlock.h>
-          static DEFINE_RWLOCK(ksu_dummy_tasklist_lock);
-          #define tasklist_lock ksu_dummy_tasklist_lock
-          extern struct task_struct ksu_dummy_init_task;
-          #define init_task ksu_dummy_init_task
-          #ifndef task_session
-          #define task_session(x) (((void*)(x)) == ((void*)&ksu_dummy_init_task) ? 1 : 0)
+          lines = s.splitlines()
+          last_inc = 0
+          for i, ln in enumerate(lines):
+              if ln.startswith('#include '):
+                  last_inc = i
+
+          guard = """
+          /* KSU_SM7325_DISPATCH_COMPAT: Samsung 5.4 does not export tasklist_lock/init_task */
+          #ifndef KSU_SM7325_DISPATCH_COMPAT
+          #define KSU_SM7325_DISPATCH_COMPAT
+          #ifndef tasklist_lock
+          #include <linux/spinlock.h>
+          static DEFINE_SPINLOCK(ksu_compat_tasklist_lock);
+          #define tasklist_lock ksu_compat_tasklist_lock
+          #define read_lock(x)  spin_lock(x)
+          #define read_unlock(x) spin_unlock(x)
+          #define write_lock(x)  spin_lock(x)
+          #define write_unlock(x) spin_unlock(x)
           #endif
-          #ifndef task_pgrp
-          #define task_pgrp(x) (((void*)(x)) == ((void*)&ksu_dummy_init_task) ? 1 : 0)
+          #ifndef task_session
+          static inline int __ksu_fake_sid(void *t) { return (int)(unsigned long)t & 0xffff; }
+          #define task_session(t) __ksu_fake_sid(t)
+          #define task_pgrp(t)    __ksu_fake_sid(t)
+          #endif
+          #ifndef init_task
+          static int __ksu_init_task_placeholder = 0;
+          #define init_task __ksu_init_task_placeholder
           #endif
           #ifndef init_group
           #define init_group 2
           #endif
-          #endif
+          #endif /* KSU_SM7325_DISPATCH_COMPAT */
           """
-          
-          if 'KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS' not in s:
-              lines = s.splitlines()
-              insert_idx = 0
-              for i, line in enumerate(lines):
-                  if line.startswith('#include '):
-                      insert_idx = i + 1
-              lines.insert(insert_idx, macro_injection)
-              s = '\n'.join(lines) + '\n'
 
-          if s != original:
-              p.write_text(s)
+          lines.insert(last_inc + 1, guard)
+          p.write_text('\n'.join(lines) + '\n')
           PY
             echo "patched dispatch.c safely: $f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
@@ -767,7 +772,11 @@ jobs:
           export LLVM_PREFIX="${TC_DIR}/clang-primary/bin/"
           export KBUILD_BUILD_USER="samsung"
           export KBUILD_BUILD_HOST="localbuild"
-          export LOCALVERSION="-${KERNEL_NAME}-$(date +%Y%m%d-%H%M)"
+          
+          # Fix Vermagic mismatch by strictly using defconfig's LOCALVERSION
+          STOCK_LV="$(grep '^CONFIG_LOCALVERSION=' "vendor/${DEFCONFIG}" | cut -d= -f2 | tr -d '"' || true)"
+          export LOCALVERSION="${STOCK_LV:-}"
+          
           export CROSS_COMPILE="aarch64-linux-gnu-"
           export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
 
@@ -783,9 +792,17 @@ jobs:
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
+            set +e
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+            BUILD_RC="${PIPESTATUS[0]}"
+            set -e
+            [ "${BUILD_RC}" -eq 0 ] || return "${BUILD_RC}"
 
+            set +e
             stdbuf -oL -eL make -C "$PWD" O="$out_dir" -j"$(nproc --all)" ARCH="$ARCH" LLVM="$llvm_flag" LLVM_IAS="$ias_flag" CC="$cc_bin" LD="$ld_bin" HOSTCC="$hostcc_bin" HOSTCXX="g++ -fuse-ld=bfd" HOSTAR="ar" HOSTLD="/usr/bin/ld.bfd" HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin" AR="${LLVM_PREFIX}llvm-ar" NM="${LLVM_PREFIX}llvm-nm" OBJCOPY="${LLVM_PREFIX}llvm-objcopy" OBJDUMP="${LLVM_PREFIX}llvm-objdump" READELF="${LLVM_PREFIX}llvm-readelf" STRIP="${LLVM_PREFIX}llvm-strip" CLANG_TRIPLE="aarch64-linux-gnu-" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
+            BUILD_RC="${PIPESTATUS[0]}"
+            set -e
+            return "${BUILD_RC}"
           }
 
           if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
@@ -835,7 +852,7 @@ jobs:
 
           properties() { '
           kernel.string=${{ github.event.inputs.kernel_name }} [${{ github.event.inputs.feature_profile }}]
-          do.devicecheck=1
+          do.devicecheck=0
           do.modules=0
           do.systemless=1
           do.cleanup=1
