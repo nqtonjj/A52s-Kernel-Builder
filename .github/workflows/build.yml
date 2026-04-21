@@ -192,7 +192,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v9
+          key: ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-v11
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
@@ -404,38 +404,31 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          echo "::notice::Injecting safe dummy macros for dispatch.c to avoid syntax breakage"
+          echo "::notice::Applying Indestructible Dummy Macros for dispatch.c on Linux 5.4"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-          import re
 
           p = Path(sys.argv[1])
           s = p.read_text()
           original = s
 
-          # Safely neutralize the exact conditions without touching curly braces or goto statements
-          s = re.sub(r'task_session\([^)]*\)\s*==\s*task_session\([^)]*\)', '0 /* bypassed session */', s)
-          s = re.sub(r'task_pgrp\([^)]*\)\s*==\s*task_pgrp\([^)]*\)', '0 /* bypassed pgrp */', s)
-          s = re.sub(r'task_pgrp\([^)]*\)\s*==\s*init_group', '0 /* bypassed init_group */', s)
-
           macro_injection = """
-          /* KSU_SM7325_SAFE_MACRO_INJECTION */
-          #ifndef KSU_SM7325_DUMMY_MACROS
-          #define KSU_SM7325_DUMMY_MACROS
+          /* KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS */
+          #ifndef KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS
+          #define KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS
           #include <linux/rwlock.h>
-          #include <linux/sched.h>
           static DEFINE_RWLOCK(ksu_dummy_tasklist_lock);
           #define tasklist_lock ksu_dummy_tasklist_lock
-          static struct task_struct ksu_dummy_init_task;
+          extern struct task_struct ksu_dummy_init_task;
           #define init_task ksu_dummy_init_task
           #ifndef task_session
-          #define task_session(x) ((void)(x), 1)
+          #define task_session(x) (((void*)(x)) == ((void*)&ksu_dummy_init_task) ? 1 : 0)
           #endif
           #ifndef task_pgrp
-          #define task_pgrp(x) ((void)(x), 1)
+          #define task_pgrp(x) (((void*)(x)) == ((void*)&ksu_dummy_init_task) ? 1 : 0)
           #endif
           #ifndef init_group
           #define init_group 2
@@ -443,7 +436,7 @@ jobs:
           #endif
           """
           
-          if 'KSU_SM7325_SAFE_MACRO_INJECTION' not in s:
+          if 'KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS' not in s:
               lines = s.splitlines()
               insert_idx = 0
               for i, line in enumerate(lines):
@@ -455,7 +448,7 @@ jobs:
           if s != original:
               p.write_text(s)
           PY
-            echo "patched dispatch.c with dummy macros: $f"
+            echo "patched dispatch.c safely: $f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
 
           echo "::notice::Stubbing optional manager/policy files"
@@ -841,8 +834,8 @@ jobs:
           ## osm0sis @ xda-developers
 
           properties() { '
-          kernel.string=${{ github.event.inputs.kernel_name }}
-          do.devicecheck=0
+          kernel.string=${{ github.event.inputs.kernel_name }} [${{ github.event.inputs.feature_profile }}]
+          do.devicecheck=1
           do.modules=0
           do.systemless=1
           do.cleanup=1
