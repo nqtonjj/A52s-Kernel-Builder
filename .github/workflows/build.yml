@@ -255,8 +255,7 @@ jobs:
           }
 
           # NON-GKI / built-in manual integration
-          # KHÔNG dùng setup.sh vì script này truyền commit hash dễ gây lỗi.
-          # Tự động chèn Kconfig/Makefile thủ công như dưới đây:
+          # Tự động chèn Kconfig/Makefile thủ công
           test -d KernelSU/kernel
           test -f KernelSU/kernel/Makefile
           test -f KernelSU/kernel/Kconfig
@@ -359,13 +358,7 @@ jobs:
             grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
           done < <(grep -RIlE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          # ============================================================
-          # GLOBAL TWA_RESUME COMPAT — Samsung 5.4 không có
-          # enum task_work_notify_mode. task_work_add() nhận bool notify.
-          # TWA_NONE=0 (false), TWA_RESUME=1 (true), TWA_SIGNAL=1 (true).
-          # Phải patch TOÀN BỘ KernelSU, không chỉ allowlist.c.
-          # ============================================================
-          echo "::notice::Global TWA_RESUME/TWA_SIGNAL compat for Samsung 5.4 (bool notify, no enum)"
+          echo "::notice::Global TWA_RESUME/TWA_SIGNAL compat for Samsung 5.4"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             sed -i \
@@ -374,7 +367,6 @@ jobs:
               -e 's/\bTWA_SIGNAL_NO_IPI\b/1/g' \
               -e 's/\bTWA_NONE\b/0/g' \
               "$f"
-            echo "  TWA-patched: $f"
           done < <(grep -RIlE '\bTWA_RESUME\b|\bTWA_SIGNAL\b|\bTWA_SIGNAL_NO_IPI\b|\bTWA_NONE\b' KernelSU drivers/kernelsu 2>/dev/null || true)
 
           echo "::notice::Patching global task_work API for Samsung Linux 5.4"
@@ -411,13 +403,7 @@ jobs:
           if s != original:
               p.write_text(s)
           PY
-            echo "patched global legacy API: $f"
           done < <(grep -RIlE --include='*.c' --include='*.h' 'task_work_add|init_task_work|put_task_struct' KernelSU drivers/kernelsu 2>/dev/null || true)
-
-          echo "::group::verify-taskwork-compat"
-          grep -RIn 'TWA_RESUME' KernelSU drivers/kernelsu 2>/dev/null || true
-          grep -RIn 'task_work_add' KernelSU drivers/kernelsu 2>/dev/null || true
-          echo "::endgroup::"
 
           mkdir -p include/linux/log
           cat > include/linux/log/perflog.h <<'EOF'
@@ -471,7 +457,7 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          echo "::notice::Applying Safe Dummy Macros for dispatch.c to bypass missing Samsung 5.4 symbols"
+          echo "::notice::Applying Safe Dummy Macros for dispatch.c"
           while IFS= read -r f; do
             [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
@@ -515,7 +501,6 @@ jobs:
           if s != original:
               p.write_text(s)
           PY
-            echo "patched dispatch.c safely: $f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
 
           echo "::notice::Stubbing optional manager/policy files"
@@ -599,25 +584,10 @@ jobs:
           cat > "${KSU_REAL_DIR}/ksu_compat_linkfix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
 
-          /*
-           * Samsung SM7325 / Linux 5.4 compatibility link-fix object.
-           * These symbols are referenced by newer SukiSU code paths but may be
-           * lost when policy / sepolicy / app_profile sources are stubbed for
-           * older Samsung kernels.
-           *
-           * Keep them weak so upstream strong definitions, if present later,
-           * automatically override these compatibility fallbacks.
-           */
-
           __attribute__((weak)) int escape_to_root_for_init(void) { return 0; }
           __attribute__((weak)) int escape_with_root_profile(void) { return 0; }
           __attribute__((weak)) int apply_kernelsu_rules(void) { return 0; }
           __attribute__((weak)) int handle_sepolicy(void) { return 0; }
-
-          /*
-           * Pre-emptive safety net for nearby optional profile / policy paths.
-           * These are kept weak and generic on purpose.
-           */
           __attribute__((weak)) int update_uid_root_profile(void) { return 0; }
           __attribute__((weak)) int update_gid_root_profile(void) { return 0; }
           __attribute__((weak)) int update_sid_root_profile(void) { return 0; }
@@ -630,12 +600,6 @@ jobs:
             [ -f "$mk" ] || continue
             grep -q 'ksu_compat_linkfix\.o' "$mk" || printf '\nobj-$(CONFIG_KSU) += ksu_compat_linkfix.o\n' >> "$mk"
           done
-
-          echo "::group::verify-linkfix"
-          ls -l "${KSU_REAL_DIR}/ksu_compat_linkfix.c" || true
-          grep -RIn 'ksu_compat_linkfix\.o' KernelSU drivers/kernelsu 2>/dev/null || true
-          grep -RInE 'escape_to_root_for_init|escape_with_root_profile|apply_kernelsu_rules|handle_sepolicy' KernelSU drivers/kernelsu 2>/dev/null || true
-          echo "::endgroup::"
 
       - name: Apply optional guarded touchscreen DEFEX stub
         if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
@@ -656,8 +620,92 @@ jobs:
                   -e 's/five_check([^;)]*)/0/g' \
                   -e 's/defex_allow([^;)]*)/0/g' \
                   "$f"
-                echo "stubbed: $f"
               done
+
+      - name: Patch legacy camera strict-prototypes for Clang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/04cc-camera-proto.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+
+          TARGET="techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/cam_sysfs_init.c"
+          if [ -f "${TARGET}" ]; then
+            python3 - "${TARGET}" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          original = s
+
+          # Thay thế khai báo hàm không tham số () thành (void)
+          pat = re.compile(
+              r'^(?P<prefix>\s*'
+              r'(?:static\s+)?'
+              r'(?:inline\s+)?'
+              r'(?:__always_inline\s+)?'
+              r'(?:noinline\s+)?'
+              r'(?:const\s+)?'
+              r'(?:unsigned\s+|signed\s+)?'
+              r'(?:long\s+|short\s+)?'
+              r'(?:struct\s+\w+\s+|enum\s+\w+\s+)?'
+              r'[\w\s\*]+?\s+)'
+              r'(?P<name>[A-Za-z_]\w*)'
+              r'\s*\(\s*\)'
+              r'(?P<tail>\s*(?:;|\{))',
+              re.M
+          )
+
+          def repl(m):
+              return f"{m.group('prefix')}{m.group('name')}(void){m.group('tail')}"
+
+          s = pat.sub(repl, s)
+
+          # Rescue dòng 4814 cụ thể nếu regex pass 1 bị sót
+          lines = s.splitlines()
+          idx = 4814 - 1
+          if 0 <= idx < len(lines):
+              for i in range(max(0, idx - 8), min(len(lines), idx + 8)):
+                  if re.search(r'\b[A-Za-z_]\w*\s*\(\s*\)\s*\{', lines[i]):
+                      lines[i] = re.sub(r'\(\s*\)', '(void)', lines[i], count=1)
+                      break
+              s = '\n'.join(lines) + ('\n' if s.endswith('\n') else '')
+
+          if s != original:
+              p.write_text(s)
+          PY
+            echo "::notice::Patched ${TARGET} to comply with strict-prototypes"
+          fi
+
+          # Tiêm -Wno-error=strict-prototypes vào Makefile camera để chống cháy nổ tiếp theo
+          FOUND_MK=""
+          for mk in \
+            techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/Makefile \
+            techpack/camera/drivers/cam_sensor_module/Makefile \
+            techpack/camera/drivers/Makefile \
+            techpack/camera/Makefile
+          do
+            if [ -f "${mk}" ]; then
+              FOUND_MK="${mk}"
+              break
+            fi
+          done
+
+          if [ -n "${FOUND_MK}" ]; then
+            if ! grep -q 'Wno-error=strict-prototypes' "${FOUND_MK}"; then
+              cat >> "${FOUND_MK}" <<'EOF'
+          # Samsung SM7325 vendor camera compat for modern clang
+          subdir-ccflags-y += $(call cc-disable-warning, strict-prototypes)
+          subdir-ccflags-y += -Wno-error=strict-prototypes
+          EOF
+              echo "::notice::Injected camera compat flags into ${FOUND_MK}"
+            fi
+          else
+            echo "::warning::No camera Makefile found to inject strict-prototypes guard"
+          fi
 
       - name: Materialize SUSFS kernel-side patchset
         if: ${{ github.event.inputs.feature_profile == 'full' }}
@@ -717,7 +765,7 @@ jobs:
 
             REJ_COUNT="$(find . -name '*.rej' | wc -l | tr -d ' ')"
             if [ "$REJ_COUNT" != "0" ]; then
-              echo "::warning::${REJ_COUNT} .rej file(s) remain. These are mostly optional features deviating from Samsung source. Force-wiping to proceed safely."
+              echo "::warning::${REJ_COUNT} .rej file(s) remain. Force-wiping to proceed safely."
               find . -name '*.rej' -delete
             fi
           fi
@@ -726,7 +774,6 @@ jobs:
           test -f include/linux/susfs.h
           test -f fs/susfs.c
           
-          # Đảm bảo susfs.o được biên dịch trong fs/Makefile
           grep -q 'susfs\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
           echo "::notice::SUSFS Makefile entry verified."
 
@@ -990,6 +1037,7 @@ jobs:
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
+            # TĂNG CƯỜNG BẢO VỆ TẦNG 3: Ép KCFLAGS chặn hoàn toàn lỗi -Wstrict-prototypes
             COMMON_ARGS=(
               -C "$PWD"
               O="$out_dir"
@@ -1005,7 +1053,7 @@ jobs:
               HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin"
               HOSTCFLAGS="-Wno-error"
               HOSTCXXFLAGS="-Wno-error"
-              KCFLAGS="-Wno-error -Wno-unused-function"
+              KCFLAGS="-Wno-error -Wno-unused-function -Wno-error=strict-prototypes"
               KCPPFLAGS="-Wno-error"
               AR="${LLVM_PREFIX}llvm-ar"
               NM="${LLVM_PREFIX}llvm-nm"
