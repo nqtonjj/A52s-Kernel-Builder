@@ -145,6 +145,7 @@ jobs:
           LOG="${GITHUB_WORKSPACE}/01-deps.log"
           exec > >(tee -a "${LOG}") 2>&1
           sudo apt-get update
+          # FIX: Added lz4 and liblz4-tool, critical for Samsung 5.4 kernel images
           sudo apt-get install -y \
             bc \
             binutils \
@@ -162,6 +163,8 @@ jobs:
             libelf-dev \
             libssl-dev \
             libncurses-dev \
+            lz4 \
+            liblz4-tool \
             pahole \
             patch \
             python3 \
@@ -192,7 +195,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v21" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v22" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -255,7 +258,6 @@ jobs:
           }
 
           # NON-GKI / built-in manual integration
-          # Tự động chèn Kconfig/Makefile thủ công
           test -d KernelSU/kernel
           test -f KernelSU/kernel/Makefile
           test -f KernelSU/kernel/Kconfig
@@ -1000,13 +1002,18 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/07-build-driver.log"
-          exec > >(tee -a "${LOG}") 2>&1
+          
+          # Không ném log shell chung vào một file nữa, in thẳng ra console cho dễ debug
           cd kernel
 
           cat > "${GITHUB_WORKSPACE}/build-kernel.sh" <<'EOF'
           set -euxo pipefail
           cd "${GITHUB_WORKSPACE}/kernel"
+
+          # FIX: Bạo lực xoá bỏ -Werror từ Makefile gốc của Kernel.
+          # Đây là nguyên nhân số 1 giết chết build khi xài Clang mới.
+          sed -i 's/-Werror//g' Makefile
+          sed -i 's/KBUILD_CFLAGS += -Werror/KBUILD_CFLAGS += -Wno-error/g' Makefile
 
           mkdir -p "$CCACHE_DIR"
           export USE_CCACHE=1
@@ -1031,13 +1038,14 @@ jobs:
             local ld_bin="$3"
             local llvm_flag="$4"
             local ias_flag="$5"
-            local hostcc_bin="$6"
             local out_dir="$OUT_DIR"
 
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
-            # TĂNG CƯỜNG BẢO VỆ TẦNG 3: Ép KCFLAGS chặn hoàn toàn lỗi -Wstrict-prototypes
+            # FIX: Gỡ bỏ việc ép HOSTCC và các cờ cực đoan. 
+            # Kbuild tự biết dùng gcc làm host compiler.
+            # Truyền CC thẳng thay vì qua string để tránh lỗi khoảng trắng của make 5.4.
             COMMON_ARGS=(
               -C "$PWD"
               O="$out_dir"
@@ -1046,15 +1054,6 @@ jobs:
               LLVM_IAS="$ias_flag"
               CC="$cc_bin"
               LD="$ld_bin"
-              HOSTCC="$hostcc_bin"
-              HOSTCXX="g++ -fuse-ld=bfd"
-              HOSTAR="ar"
-              HOSTLD="/usr/bin/ld.bfd"
-              HOSTLDFLAGS="-fuse-ld=bfd -B/usr/bin"
-              HOSTCFLAGS="-Wno-error"
-              HOSTCXXFLAGS="-Wno-error"
-              KCFLAGS="-Wno-error -Wno-unused-function -Wno-error=strict-prototypes"
-              KCPPFLAGS="-Wno-error"
               AR="${LLVM_PREFIX}llvm-ar"
               NM="${LLVM_PREFIX}llvm-nm"
               OBJCOPY="${LLVM_PREFIX}llvm-objcopy"
@@ -1066,25 +1065,33 @@ jobs:
               CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
             )
 
+            # FIX: In thẳng quá trình make ra console bằng ::group:: thay vì giấu tiệt đi.
+            echo "::group::Make Defconfig [${tag}]"
             set +e
-            stdbuf -oL -eL make "${COMMON_ARGS[@]}" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
-            BUILD_RC="${PIPESTATUS[0]}"
+            make "${COMMON_ARGS[@]}" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
+            local BUILD_RC="${PIPESTATUS[0]}"
             set -e
+            echo "::endgroup::"
+            
             [ "${BUILD_RC}" -eq 0 ] || return "${BUILD_RC}"
 
+            echo "::group::Make Kernel [${tag}]"
             set +e
-            stdbuf -oL -eL make "${COMMON_ARGS[@]}" -j"$(nproc --all)" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
+            make "${COMMON_ARGS[@]}" -j"$(nproc --all)" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
             BUILD_RC="${PIPESTATUS[0]}"
             set -e
+            echo "::endgroup::"
+            
             return "${BUILD_RC}"
           }
 
-          if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "1" "gcc -fuse-ld=bfd -B/usr/bin"; then
+          # Gọi build_once. Giờ nếu nó fail, log sẽ hiện lù lù trên console.
+          if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1" "1"; then
             echo "toolchain=proton-llvm" >> "$GITHUB_OUTPUT"
-          elif build_once "proton-gas" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "${LLVM_PREFIX}" "0" "gcc -fuse-ld=bfd -B/usr/bin"; then
+          elif build_once "proton-gas" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1" "0"; then
             echo "toolchain=proton-gas" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::All toolchain attempts failed"
+            echo "::error::All toolchain attempts failed! Scroll up and expand the 'Make Defconfig' or 'Make Kernel' groups above to see the REAL error."
             exit 1
           fi
 
@@ -1222,19 +1229,21 @@ jobs:
         run: |
           set +e
           echo "::group::compile-errors"
-          for f in ./*.log; do
+          # FIX: Quét file log trong GITHUB_WORKSPACE thay vì thư mục hiện tại (./)
+          for f in "${GITHUB_WORKSPACE}"/*.log; do
             [ -f "$f" ] || continue
-            ERR_LINES=$(grep -nEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "$f" | tail -n 80)
-            if [ -n "$ERR_LINES" ]; then
-              echo "FILE: $(basename "$f")"
-              echo "$ERR_LINES"
-            fi
+            echo ">>> Inspecting log file: $(basename "$f")"
+            # In ra 100 dòng cuối của TẤT CẢ các file log để chắc chắn không bỏ sót
+            tail -n 100 "$f"
+            echo "----------------------------------------"
           done
           echo "::endgroup::"
+          
           {
             echo "## Compile Error Report"
             echo '```text'
-            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' ./*.log | tail -n 160 || echo "No filtered error lines found."
+            # FIX: Quét lỗi ở thư mục GITHUB_WORKSPACE
+            grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "${GITHUB_WORKSPACE}"/*.log | tail -n 160 || echo "No filtered error lines found."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
