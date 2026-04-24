@@ -802,13 +802,13 @@ jobs:
           if [ -n "${CAMERA_MK}" ]; then
             if ! grep -q 'Wno-strict-prototypes' "${CAMERA_MK}"; then
               cat >> "${CAMERA_MK}" <<'MKEOF'
-
-# A52s Builder: Suppress strict-prototypes for Samsung vendor camera code
-# (Samsung cam_sysfs_init.c has thousands of legacy K&R-style empty param lists)
-# Do NOT use subdir-ccflags-y here — it propagates KBUILD_CFLAGS recursively.
-ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
-ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
-MKEOF
+          
+          # A52s Builder: Suppress strict-prototypes for Samsung vendor camera code
+          # (Samsung cam_sysfs_init.c has thousands of legacy K&R-style empty param lists)
+          # Do NOT use subdir-ccflags-y here — it propagates KBUILD_CFLAGS recursively.
+          ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
+          ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
+          MKEOF
               echo "::notice::Injected camera compat ccflags into ${CAMERA_MK}"
             else
               echo "::notice::Camera compat ccflags already present, skipping."
