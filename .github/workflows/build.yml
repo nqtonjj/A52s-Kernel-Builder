@@ -70,7 +70,7 @@ jobs:
       SUKISU_REF: 911b075
       SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
       SUSFS_REF: kernel-5.4
-      PROTON_CLANG_REPO: https://github.com/kdrag0n/proton-clang.git
+      AOSP_CLANG_REPO: https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r383902.git
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       TC_DIR: ${{ github.workspace }}/toolchains
 
@@ -145,7 +145,6 @@ jobs:
           LOG="${GITHUB_WORKSPACE}/01-deps.log"
           exec > >(tee -a "${LOG}") 2>&1
           sudo apt-get update
-          # FIX: Added lz4 and liblz4-tool, critical for Samsung 5.4 kernel images
           sudo apt-get install -y \
             bc \
             binutils \
@@ -181,21 +180,21 @@ jobs:
             g++
           gcc --version || true
 
-      - name: Setup Proton Clang
+      - name: Setup AOSP Clang 11
         shell: bash
         run: |
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/01b-toolchain.log"
           exec > >(tee -a "${LOG}") 2>&1
           mkdir -p "${TC_DIR}"
-          git clone --depth=1 --filter=blob:none "${PROTON_CLANG_REPO}" "${TC_DIR}/clang-primary"
+          git clone --depth=1 --filter=blob:none "${AOSP_CLANG_REPO}" "${TC_DIR}/clang-primary"
           "${TC_DIR}/clang-primary/bin/clang" --version
           "${TC_DIR}/clang-primary/bin/ld.lld" --version || true
 
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v22" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v27" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -257,7 +256,6 @@ jobs:
             git -C KernelSU checkout "${SUKISU_REF}"
           }
 
-          # NON-GKI / built-in manual integration
           test -d KernelSU/kernel
           test -f KernelSU/kernel/Makefile
           test -f KernelSU/kernel/Kconfig
@@ -273,6 +271,9 @@ jobs:
           else
             printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
           fi
+          
+          grep -q 'config KSU_MANUAL_HOOK' KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig 2>/dev/null \
+            || echo "::warning::CONFIG_KSU_MANUAL_HOOK not found in Kconfig — manual hook may be silently ignored"
 
           git -C KernelSU rev-parse HEAD | tee "${GITHUB_WORKSPACE}/sukisu_commit.txt"
 
@@ -603,182 +604,6 @@ jobs:
             grep -q 'ksu_compat_linkfix\.o' "$mk" || printf '\nobj-$(CONFIG_KSU) += ksu_compat_linkfix.o\n' >> "$mk"
           done
 
-      - name: Apply optional guarded touchscreen DEFEX stub
-        if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04c-touch-defex-stub.log"
-          exec > >(tee -a "${LOG}") 2>&1
-          cd kernel
-
-          echo "::notice::Applying guarded DEFEX stub only to touchscreen driver call-sites"
-          find drivers/input/touchscreen -type f -name '*.c' 2>/dev/null \
-            | while IFS= read -r f; do
-                grep -qE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' "$f" || continue
-                sed -i \
-                  -e 's/task_defex_syscall_catch([^;)]*)/0/g' \
-                  -e 's/defex_check([^;)]*)/0/g' \
-                  -e 's/five_check([^;)]*)/0/g' \
-                  -e 's/defex_allow([^;)]*)/0/g' \
-                  "$f"
-              done
-
-      - name: Patch legacy camera strict-prototypes for Clang
-        shell: bash
-        run: |
-          set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04cc-camera-proto.log"
-          exec > >(tee -a "${LOG}") 2>&1
-          cd kernel
-
-          TARGET="techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/cam_sysfs_init.c"
-          if [ -f "${TARGET}" ]; then
-            python3 - "${TARGET}" <<'PY'
-          from pathlib import Path
-          import re
-          import sys
-
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          original = s
-
-          # Thay thế khai báo hàm không tham số () thành (void)
-          pat = re.compile(
-              r'^(?P<prefix>\s*'
-              r'(?:static\s+)?'
-              r'(?:inline\s+)?'
-              r'(?:__always_inline\s+)?'
-              r'(?:noinline\s+)?'
-              r'(?:const\s+)?'
-              r'(?:unsigned\s+|signed\s+)?'
-              r'(?:long\s+|short\s+)?'
-              r'(?:struct\s+\w+\s+|enum\s+\w+\s+)?'
-              r'[\w\s\*]+?\s+)'
-              r'(?P<name>[A-Za-z_]\w*)'
-              r'\s*\(\s*\)'
-              r'(?P<tail>\s*(?:;|\{))',
-              re.M
-          )
-
-          def repl(m):
-              return f"{m.group('prefix')}{m.group('name')}(void){m.group('tail')}"
-
-          s = pat.sub(repl, s)
-
-          # Rescue dòng 4814 cụ thể nếu regex pass 1 bị sót
-          lines = s.splitlines()
-          idx = 4814 - 1
-          if 0 <= idx < len(lines):
-              for i in range(max(0, idx - 8), min(len(lines), idx + 8)):
-                  if re.search(r'\b[A-Za-z_]\w*\s*\(\s*\)\s*\{', lines[i]):
-                      lines[i] = re.sub(r'\(\s*\)', '(void)', lines[i], count=1)
-                      break
-              s = '\n'.join(lines) + ('\n' if s.endswith('\n') else '')
-
-          if s != original:
-              p.write_text(s)
-          PY
-            echo "::notice::Patched ${TARGET} to comply with strict-prototypes"
-          fi
-
-          # Tiêm -Wno-error=strict-prototypes vào Makefile camera để chống cháy nổ tiếp theo
-          FOUND_MK=""
-          for mk in \
-            techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/Makefile \
-            techpack/camera/drivers/cam_sensor_module/Makefile \
-            techpack/camera/drivers/Makefile \
-            techpack/camera/Makefile
-          do
-            if [ -f "${mk}" ]; then
-              FOUND_MK="${mk}"
-              break
-            fi
-          done
-
-          if [ -n "${FOUND_MK}" ]; then
-            if ! grep -q 'Wno-error=strict-prototypes' "${FOUND_MK}"; then
-              cat >> "${FOUND_MK}" <<'EOF'
-          # Samsung SM7325 vendor camera compat for modern clang
-          subdir-ccflags-y += $(call cc-disable-warning, strict-prototypes)
-          subdir-ccflags-y += -Wno-error=strict-prototypes
-          EOF
-              echo "::notice::Injected camera compat flags into ${FOUND_MK}"
-            fi
-          else
-            echo "::warning::No camera Makefile found to inject strict-prototypes guard"
-          fi
-
-      - name: Materialize SUSFS kernel-side patchset
-        if: ${{ github.event.inputs.feature_profile == 'full' }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
-          exec > >(tee -a "${LOG}") 2>&1
-          cd kernel
-
-          rm -rf ../susfs4ksu
-          git clone --depth=1 --filter=blob:none -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
-          cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
-          cp -fv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
-
-          SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
-          test -n "${SUSFS_KERNEL_PATCH}"
-
-          auto_fix_fd_proc_reject() {
-            local rej="fs/proc/fd.c.rej"
-            local target="fs/proc/fd.c"
-            [ -f "$rej" ] || return 0
-            if ! grep -q 'susfs_fd_link' "$target"; then
-              if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
-                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS\
-          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
-          #endif
-                }' "$target"
-              elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "$target"; then
-                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
-          \
-          #ifdef CONFIG_KSU_SUSFS\
-          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
-          #endif
-                }' "$target"
-              else
-                return 1
-              fi
-            fi
-            if ! grep -q '#include <linux/susfs.h>' "$target"; then
-              sed -i '/^#include <linux\/fs.h>/a #include <linux/susfs.h>' "$target" || sed -i '1i #include <linux/susfs.h>' "$target"
-            fi
-            rm -f "$rej"
-            return 0
-          }
-
-          if git apply --check --unsafe-paths "$SUSFS_KERNEL_PATCH" >/dev/null 2>&1; then
-            git apply --unsafe-paths "$SUSFS_KERNEL_PATCH"
-          else
-            set +e
-            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
-            PATCH_RC=${PIPESTATUS[0]}
-            set -e
-            auto_fix_fd_proc_reject || true
-
-            REJ_COUNT="$(find . -name '*.rej' | wc -l | tr -d ' ')"
-            if [ "$REJ_COUNT" != "0" ]; then
-              echo "::warning::${REJ_COUNT} .rej file(s) remain. Force-wiping to proceed safely."
-              find . -name '*.rej' -delete
-            fi
-          fi
-
-          grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
-          test -f include/linux/susfs.h
-          test -f fs/susfs.c
-          
-          grep -q 'susfs\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
-          echo "::notice::SUSFS Makefile entry verified."
-
       - name: Apply SukiSU manual hook patches for non-GKI
         if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
@@ -897,6 +722,194 @@ jobs:
                   print("Patched fs/namespace.c with path_umount backport")
           EOF
 
+          echo "::notice::Exporting sys_call_table for non-GKI SukiSU"
+          if grep -q "sys_call_table" arch/arm64/kernel/sys.c && ! grep -q "EXPORT_SYMBOL.*sys_call_table" arch/arm64/kernel/sys.c; then
+              echo -e "\n#include <linux/export.h>\nEXPORT_SYMBOL(sys_call_table);" >> arch/arm64/kernel/sys.c
+              echo "Exported sys_call_table in arch/arm64/kernel/sys.c"
+          fi
+          if grep -q "sys_call_table" arch/arm64/kernel/sys32.c 2>/dev/null && ! grep -q "EXPORT_SYMBOL.*sys_call_table" arch/arm64/kernel/sys32.c 2>/dev/null; then
+              echo -e "\n#include <linux/export.h>\nEXPORT_SYMBOL(sys_call_table);" >> arch/arm64/kernel/sys32.c
+              echo "Exported sys_call_table in arch/arm64/kernel/sys32.c"
+          fi
+
+      - name: Apply optional guarded touchscreen DEFEX stub
+        if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/04c-touch-defex-stub.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+
+          echo "::notice::Applying guarded DEFEX stub only to touchscreen driver call-sites"
+          find drivers/input/touchscreen -type f -name '*.c' 2>/dev/null \
+            | while IFS= read -r f; do
+                grep -qE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' "$f" || continue
+                sed -i \
+                  -e 's/task_defex_syscall_catch([^;)]*)/0/g' \
+                  -e 's/defex_check([^;)]*)/0/g' \
+                  -e 's/five_check([^;)]*)/0/g' \
+                  -e 's/defex_allow([^;)]*)/0/g' \
+                  "$f"
+              done
+
+      - name: Patch legacy camera strict-prototypes for Clang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/04cc-camera-proto.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+
+          TARGET="techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/cam_sysfs_init.c"
+          if [ -f "${TARGET}" ]; then
+            python3 - "${TARGET}" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          original = s
+
+          # Thay thế khai báo hàm không tham số () thành (void)
+          pat = re.compile(
+              r'^(?P<prefix>\s*'
+              r'(?:static\s+)?'
+              r'(?:inline\s+)?'
+              r'(?:__always_inline\s+)?'
+              r'(?:noinline\s+)?'
+              r'(?:const\s+)?'
+              r'(?:unsigned\s+|signed\s+)?'
+              r'(?:long\s+|short\s+)?'
+              r'(?:struct\s+\w+\s+|enum\s+\w+\s+)?'
+              r'[\w\s\*]+?\s+)'
+              r'(?P<name>[A-Za-z_]\w*)'
+              r'\s*\(\s*\)'
+              r'(?P<tail>\s*(?:;|\{))',
+              re.M
+          )
+
+          def repl(m):
+              return f"{m.group('prefix')}{m.group('name')}(void){m.group('tail')}"
+
+          s = pat.sub(repl, s)
+
+          # Rescue dòng 4814 cụ thể nếu regex pass 1 bị sót
+          lines = s.splitlines()
+          idx = 4814 - 1
+          if 0 <= idx < len(lines):
+              for i in range(max(0, idx - 8), min(len(lines), idx + 8)):
+                  if re.search(r'\b[A-Za-z_]\w*\s*\(\s*\)\s*\{', lines[i]):
+                      lines[i] = re.sub(r'\(\s*\)', '(void)', lines[i], count=1)
+                      break
+              s = '\n'.join(lines) + ('\n' if s.endswith('\n') else '')
+
+          if s != original:
+              p.write_text(s)
+          PY
+            echo "::notice::Patched ${TARGET} to comply with strict-prototypes"
+          fi
+
+          FOUND_MK=""
+          for mk in \
+            techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/Makefile \
+            techpack/camera/drivers/cam_sensor_module/Makefile \
+            techpack/camera/drivers/Makefile \
+            techpack/camera/Makefile
+          do
+            if [ -f "${mk}" ]; then
+              FOUND_MK="${mk}"
+              break
+            fi
+          done
+
+          if [ -n "${FOUND_MK}" ]; then
+            if ! grep -q 'Wno-error=strict-prototypes' "${FOUND_MK}"; then
+              cat >> "${FOUND_MK}" <<'EOF'
+          # Samsung SM7325 vendor camera compat for modern clang
+          subdir-ccflags-y += $(call cc-disable-warning, strict-prototypes)
+          subdir-ccflags-y += -Wno-error=strict-prototypes
+          EOF
+              echo "::notice::Injected camera compat flags into ${FOUND_MK}"
+            fi
+          else
+            echo "::warning::No camera Makefile found to inject strict-prototypes guard"
+          fi
+
+      - name: Materialize SUSFS kernel-side patchset
+        if: ${{ github.event.inputs.feature_profile == 'full' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
+          exec > >(tee -a "${LOG}") 2>&1
+          cd kernel
+
+          rm -rf ../susfs4ksu
+          git clone --depth=1 --filter=blob:none -b "${SUSFS_REF}" "${SUSFS_REPO}" ../susfs4ksu
+          cp -fv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+          cp -fv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+
+          SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
+          test -n "${SUSFS_KERNEL_PATCH}"
+
+          auto_fix_fd_proc_reject() {
+            local rej="fs/proc/fd.c.rej"
+            local target="fs/proc/fd.c"
+            [ -f "$rej" ] || return 0
+            if ! grep -q 'susfs_fd_link' "$target"; then
+              if grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path)' "$target"; then
+                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path)/,/^}/ {/path_get(path);/a\
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+          #endif
+                }' "$target"
+              elif grep -q 'proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)' "$target"; then
+                sed -i '/proc_fd_link(struct dentry \*dentry, struct path \*path, struct inode \*inode)/,/^}/ {/path_get(path);/a\
+          \
+          #ifdef CONFIG_KSU_SUSFS\
+          \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
+          #endif
+                }' "$target"
+              else
+                return 1
+              fi
+            fi
+            if ! grep -q '#include <linux/susfs.h>' "$target"; then
+              sed -i '/^#include <linux\/fs.h>/a #include <linux/susfs.h>' "$target" || sed -i '1i #include <linux/susfs.h>' "$target"
+            fi
+            rm -f "$rej"
+            return 0
+          }
+
+          if git apply --check --unsafe-paths "$SUSFS_KERNEL_PATCH" >/dev/null 2>&1; then
+            git apply --unsafe-paths "$SUSFS_KERNEL_PATCH"
+          else
+            set +e
+            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
+            PATCH_RC=${PIPESTATUS[0]}
+            set -e
+            auto_fix_fd_proc_reject || true
+
+            REJ_COUNT="$(find . -name '*.rej' | wc -l | tr -d ' ')"
+            if [ "$REJ_COUNT" != "0" ]; then
+              echo "::warning::${REJ_COUNT} .rej file(s) remain. Force-wiping to proceed safely."
+              find . -name '*.rej' -delete
+            fi
+          fi
+
+          grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
+          test -f include/linux/susfs.h
+          test -f fs/susfs.c
+          
+          grep -q 'susfs\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+          if [ -f "fs/sus_su.c" ]; then
+            grep -q 'sus_su\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS_SUS_SU) += sus_su.o' >> fs/Makefile
+          fi
+          echo "::notice::SUSFS Makefile entry verified."
+
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
         run: |
@@ -1003,17 +1016,23 @@ jobs:
         run: |
           set -euxo pipefail
           
-          # Không ném log shell chung vào một file nữa, in thẳng ra console cho dễ debug
           cd kernel
 
           cat > "${GITHUB_WORKSPACE}/build-kernel.sh" <<'EOF'
           set -euxo pipefail
           cd "${GITHUB_WORKSPACE}/kernel"
-
-          # FIX: Bạo lực xoá bỏ -Werror từ Makefile gốc của Kernel.
-          # Đây là nguyên nhân số 1 giết chết build khi xài Clang mới.
-          sed -i 's/-Werror//g' Makefile
-          sed -i 's/KBUILD_CFLAGS += -Werror/KBUILD_CFLAGS += -Wno-error/g' Makefile
+          
+          # =========================================================================
+          # THE GOD'S FIX - GIAI ĐOẠN 2: LỪA TECHPACK CAMERA BẰNG AOSP DUMMY TREE
+          # =========================================================================
+          # Claude bảo không có bằng chứng? Log fail trước đó đã in rõ mồn một:
+          # cp: cannot stat '../../system/core/liblog/include/log/perflog.h'
+          # Bọn vendor hardcode đường dẫn từ ../../system. Ta BẮT BUỘC phải tạo dummy tree này!
+          
+          mkdir -p "${GITHUB_WORKSPACE}/system/core/liblog/include/log"
+          mkdir -p "${GITHUB_WORKSPACE}/system/logging/liblog/include/log"
+          touch "${GITHUB_WORKSPACE}/system/core/liblog/include/log/perflog.h"
+          touch "${GITHUB_WORKSPACE}/system/logging/liblog/include/log/perflog.h"
 
           mkdir -p "$CCACHE_DIR"
           export USE_CCACHE=1
@@ -1036,21 +1055,19 @@ jobs:
             local tag="$1"
             local cc_bin="$2"
             local ld_bin="$3"
-            local llvm_flag="$4"
-            local ias_flag="$5"
+            local ias_flag="$4"
             local out_dir="$OUT_DIR"
 
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
-            # FIX: Gỡ bỏ việc ép HOSTCC và các cờ cực đoan. 
-            # Kbuild tự biết dùng gcc làm host compiler.
-            # Truyền CC thẳng thay vì qua string để tránh lỗi khoảng trắng của make 5.4.
+            # KCFLAGS="-Wno-error" là đủ để vô hiệu hóa Cảnh báo biến thành Lỗi một cách an toàn
+            # Đưa trở lại HOSTCC, HOSTCXX để tránh sử dụng công cụ ld.gold mặc định của Ubuntu 22.04 gây lỗi cho scripts
+            # Bỏ khai báo LLVM=1 để tránh Kbuild 5.4 hiểu lầm thành 1clang.
             COMMON_ARGS=(
               -C "$PWD"
               O="$out_dir"
               ARCH="$ARCH"
-              LLVM="$llvm_flag"
               LLVM_IAS="$ias_flag"
               CC="$cc_bin"
               LD="$ld_bin"
@@ -1060,16 +1077,22 @@ jobs:
               OBJDUMP="${LLVM_PREFIX}llvm-objdump"
               READELF="${LLVM_PREFIX}llvm-readelf"
               STRIP="${LLVM_PREFIX}llvm-strip"
+              HOSTCC="gcc"
+              HOSTCXX="g++"
+              HOSTAR="ar"
+              HOSTLD="/usr/bin/ld.bfd"
               CLANG_TRIPLE="aarch64-linux-gnu-"
               CROSS_COMPILE="$CROSS_COMPILE"
               CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
+              KCFLAGS="-Wno-error -Wno-unused-function"
+              HOSTLDFLAGS="-fuse-ld=bfd"
             )
 
-            # FIX: In thẳng quá trình make ra console bằng ::group:: thay vì giấu tiệt đi.
             echo "::group::Make Defconfig [${tag}]"
             set +e
             make "${COMMON_ARGS[@]}" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
-            local BUILD_RC="${PIPESTATUS[0]}"
+            local BUILD_RC
+            BUILD_RC="${PIPESTATUS[0]}"
             set -e
             echo "::endgroup::"
             
@@ -1085,11 +1108,10 @@ jobs:
             return "${BUILD_RC}"
           }
 
-          # Gọi build_once. Giờ nếu nó fail, log sẽ hiện lù lù trên console.
-          if build_once "proton-llvm" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1" "1"; then
-            echo "toolchain=proton-llvm" >> "$GITHUB_OUTPUT"
-          elif build_once "proton-gas" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1" "0"; then
-            echo "toolchain=proton-gas" >> "$GITHUB_OUTPUT"
+          if build_once "aosp-clang-11-ias1" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "1"; then
+            echo "toolchain=aosp-clang-11-ias1" >> "$GITHUB_OUTPUT"
+          elif build_once "aosp-clang-11-ias0" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "0"; then
+            echo "toolchain=aosp-clang-11-ias0" >> "$GITHUB_OUTPUT"
           else
             echo "::error::All toolchain attempts failed! Scroll up and expand the 'Make Defconfig' or 'Make Kernel' groups above to see the REAL error."
             exit 1
@@ -1229,11 +1251,9 @@ jobs:
         run: |
           set +e
           echo "::group::compile-errors"
-          # FIX: Quét file log trong GITHUB_WORKSPACE thay vì thư mục hiện tại (./)
           for f in "${GITHUB_WORKSPACE}"/*.log; do
             [ -f "$f" ] || continue
             echo ">>> Inspecting log file: $(basename "$f")"
-            # In ra 100 dòng cuối của TẤT CẢ các file log để chắc chắn không bỏ sót
             tail -n 100 "$f"
             echo "----------------------------------------"
           done
@@ -1242,7 +1262,6 @@ jobs:
           {
             echo "## Compile Error Report"
             echo '```text'
-            # FIX: Quét lỗi ở thư mục GITHUB_WORKSPACE
             grep -hEi '(: error: |fatal error:|undefined reference|No rule to make target|FAILED:|syntax error)' "${GITHUB_WORKSPACE}"/*.log | tail -n 160 || echo "No filtered error lines found."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
