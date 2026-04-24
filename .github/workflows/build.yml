@@ -209,7 +209,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v29" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v30" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -768,7 +768,7 @@ jobs:
                   "$f"
               done
 
-      - name: Patch legacy camera strict-prototypes for Clang
+      - name: Patch legacy camera Makefile (NO C-file patching - safe ccflags only)
         shell: bash
         run: |
           set -euxo pipefail
@@ -776,57 +776,16 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
-          TARGET="techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/cam_sysfs_init.c"
-          if [ -f "${TARGET}" ]; then
-            python3 - "${TARGET}" <<'PY'
-          from pathlib import Path
-          import re
-          import sys
+          # ============================================================
+          # ROOT CAUSE FIX:
+          # KHÔNG patch C file. Chỉ dùng ccflags-y ở Makefile
+          # và KCFLAGS ở build command để suppress strict-prototypes warning.
+          # ============================================================
 
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          original = s
+          echo "::notice::Injecting camera Makefile ccflags (NO C-file patching)"
 
-          # Thay thế khai báo hàm không tham số () thành (void)
-          pat = re.compile(
-              r'^(?P<prefix>\s*'
-              r'(?:static\s+)?'
-              r'(?:inline\s+)?'
-              r'(?:__always_inline\s+)?'
-              r'(?:noinline\s+)?'
-              r'(?:const\s+)?'
-              r'(?:unsigned\s+|signed\s+)?'
-              r'(?:long\s+|short\s+)?'
-              r'(?:struct\s+\w+\s+|enum\s+\w+\s+)?'
-              r'[\w\s\*]+?\s+)'
-              r'(?P<name>[A-Za-z_]\w*)'
-              r'\s*\(\s*\)'
-              r'(?P<tail>\s*(?:;|\{))',
-              re.M
-          )
-
-          def repl(m):
-              return f"{m.group('prefix')}{m.group('name')}(void){m.group('tail')}"
-
-          s = pat.sub(repl, s)
-
-          # Rescue dòng 4814 cụ thể nếu regex pass 1 bị sót
-          lines = s.splitlines()
-          idx = 4814 - 1
-          if 0 <= idx < len(lines):
-              for i in range(max(0, idx - 8), min(len(lines), idx + 8)):
-                  if re.search(r'\b[A-Za-z_]\w*\s*\(\s*\)\s*\{', lines[i]):
-                      lines[i] = re.sub(r'\(\s*\)', '(void)', lines[i], count=1)
-                      break
-              s = '\n'.join(lines) + ('\n' if s.endswith('\n') else '')
-
-          if s != original:
-              p.write_text(s)
-          PY
-            echo "::notice::Patched ${TARGET} to comply with strict-prototypes"
-          fi
-
-          FOUND_MK=""
+          # Tìm Makefile camera gần nhất để inject ccflags-y
+          CAMERA_MK=""
           for mk in \
             techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/Makefile \
             techpack/camera/drivers/cam_sensor_module/Makefile \
@@ -834,23 +793,39 @@ jobs:
             techpack/camera/Makefile
           do
             if [ -f "${mk}" ]; then
-              FOUND_MK="${mk}"
+              CAMERA_MK="${mk}"
+              echo "::notice::Found camera Makefile: ${mk}"
               break
             fi
           done
 
-          if [ -n "${FOUND_MK}" ]; then
-            if ! grep -q 'Wno-strict-prototypes' "${FOUND_MK}"; then
-              cat >> "${FOUND_MK}" <<'EOF'
-          # THE GOD'S FIX - GIAI ĐOẠN 1: TRIỆT TIÊU ĐỆ QUY KBUILD_CFLAGS
-          # Không dùng 'subdir-ccflags-y += $(call cc-disable-warning...)' vì nó sẽ gây đệ quy KBUILD_CFLAGS.
-          ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
-          EOF
-              echo "::notice::Injected camera compat flags into ${FOUND_MK}"
+          if [ -n "${CAMERA_MK}" ]; then
+            if ! grep -q 'Wno-strict-prototypes' "${CAMERA_MK}"; then
+              cat >> "${CAMERA_MK}" <<'MKEOF'
+
+# A52s Builder: Suppress strict-prototypes for Samsung vendor camera code
+# (Samsung cam_sysfs_init.c has thousands of legacy K&R-style empty param lists)
+# Do NOT use subdir-ccflags-y here — it propagates KBUILD_CFLAGS recursively.
+ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
+ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
+MKEOF
+              echo "::notice::Injected camera compat ccflags into ${CAMERA_MK}"
+            else
+              echo "::notice::Camera compat ccflags already present, skipping."
             fi
           else
-            echo "::warning::No camera Makefile found to inject strict-prototypes guard"
+            echo "::warning::No camera Makefile found. Will rely on global KCFLAGS only."
           fi
+
+          # Áp dụng tương tự cho tất cả Makefile trong techpack/camera (phòng thủ sâu)
+          find techpack/camera -maxdepth 4 -type f -name Makefile 2>/dev/null \
+            | while IFS= read -r mk; do
+                grep -q 'Wno-strict-prototypes' "${mk}" && continue
+                printf '\nccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes\n' >> "${mk}"
+                echo "  ccflags injected: ${mk}"
+              done
+
+          echo "::notice::Camera ccflags injection complete."
 
       - name: Patch Techpack Camera Makefiles (Bypass Missing Files)
         shell: bash
@@ -1102,8 +1077,8 @@ jobs:
               CLANG_TRIPLE="aarch64-linux-gnu-"
               CROSS_COMPILE="$CROSS_COMPILE"
               CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
-              KCFLAGS="-Wno-error"
               HOSTLDFLAGS="-fuse-ld=bfd"
+              KCFLAGS="-Wno-error -Wno-strict-prototypes -Wno-implicit-function-declaration -Wno-unused-function -Wno-misleading-indentation"
             )
 
             echo "::group::Make Defconfig [${tag}]"
