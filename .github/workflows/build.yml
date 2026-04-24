@@ -209,7 +209,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v30" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v31" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -802,13 +802,13 @@ jobs:
           if [ -n "${CAMERA_MK}" ]; then
             if ! grep -q 'Wno-strict-prototypes' "${CAMERA_MK}"; then
               cat >> "${CAMERA_MK}" <<'MKEOF'
-          
-          # A52s Builder: Suppress strict-prototypes for Samsung vendor camera code
-          # (Samsung cam_sysfs_init.c has thousands of legacy K&R-style empty param lists)
-          # Do NOT use subdir-ccflags-y here — it propagates KBUILD_CFLAGS recursively.
-          ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
-          ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
-          MKEOF
+
+# A52s Builder: Suppress strict-prototypes for Samsung vendor camera code
+# (Samsung cam_sysfs_init.c has thousands of legacy K&R-style empty param lists)
+# Do NOT use subdir-ccflags-y here — it propagates KBUILD_CFLAGS recursively.
+ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
+ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
+MKEOF
               echo "::notice::Injected camera compat ccflags into ${CAMERA_MK}"
             else
               echo "::notice::Camera compat ccflags already present, skipping."
@@ -1029,6 +1029,18 @@ jobs:
           cat > "${GITHUB_WORKSPACE}/build-kernel.sh" <<'EOF'
           set -euxo pipefail
           cd "${GITHUB_WORKSPACE}/kernel"
+          
+          # =========================================================================
+          # THE GOD'S FIX - GIAI ĐOẠN 2: LỪA TECHPACK CAMERA BẰNG AOSP DUMMY TREE
+          # =========================================================================
+          # Claude bảo không có bằng chứng? Log fail trước đó đã in rõ mồn một:
+          # cp: cannot stat '../../system/core/liblog/include/log/perflog.h'
+          # Bọn vendor hardcode đường dẫn từ ../../system. Ta BẮT BUỘC phải tạo dummy tree này!
+          
+          mkdir -p "${GITHUB_WORKSPACE}/system/core/liblog/include/log"
+          mkdir -p "${GITHUB_WORKSPACE}/system/logging/liblog/include/log"
+          touch "${GITHUB_WORKSPACE}/system/core/liblog/include/log/perflog.h"
+          touch "${GITHUB_WORKSPACE}/system/logging/liblog/include/log/perflog.h"
 
           mkdir -p "$CCACHE_DIR"
           export USE_CCACHE=1
@@ -1157,7 +1169,7 @@ jobs:
 
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" .
 
-          DTB_DIR="${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dts/vendor/qcom"
+          DTB_DIR="${{ steps.cfg.outputs.out_dir }}/arch/arch/arm64/boot/dts/vendor/qcom"
           DTB_FILE=""
           case "${{ github.event.inputs.region }}" in
             eur) DTB_FILE="sm7325-a52sxq_eur_open.dtb" ;;
@@ -1223,14 +1235,6 @@ jobs:
 
           cd ..
           
-          MODULE_COUNT=$(find "${{ steps.cfg.outputs.out_dir }}" -name "*.ko" | wc -l)
-          if [ "$MODULE_COUNT" -gt 0 ]; then
-            echo "::notice::Found ${MODULE_COUNT} kernel modules. Enabling module flashing."
-            sed -i 's/do.modules=0/do.modules=1/' AnyKernel3/anykernel.sh
-            mkdir -p AnyKernel3/modules/system/lib/modules
-            find "${{ steps.cfg.outputs.out_dir }}" -name "*.ko" -exec cp {} AnyKernel3/modules/system/lib/modules/ \;
-          fi
-
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
