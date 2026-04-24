@@ -70,7 +70,7 @@ jobs:
       SUKISU_REF: 911b075
       SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
       SUSFS_REF: kernel-5.4
-      AOSP_CLANG_REPO: https://github.com/Ancient-Lab/prebuilts_clang_host_linux-x86_clang-r383902.git
+      AOSP_CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r383902.tar.gz
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       TC_DIR: ${{ github.workspace }}/toolchains
 
@@ -180,21 +180,36 @@ jobs:
             g++
           gcc --version || true
 
-      - name: Setup AOSP Clang 11
+      - name: Setup AOSP Clang 11 (Google Direct)
         shell: bash
         run: |
           set -euxo pipefail
           LOG="${GITHUB_WORKSPACE}/01b-toolchain.log"
           exec > >(tee -a "${LOG}") 2>&1
-          mkdir -p "${TC_DIR}"
-          git clone --depth=1 --filter=blob:none "${AOSP_CLANG_REPO}" "${TC_DIR}/clang-primary"
+          
+          mkdir -p "${TC_DIR}/clang-primary"
+          
+          echo "::group::Download AOSP Clang from Google Source"
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "${AOSP_CLANG_URL}" \
+            -o "${TC_DIR}/clang-r383902.tar.gz"
+          echo "::endgroup::"
+
+          echo "::group::Extract Toolchain"
+          tar -xzf "${TC_DIR}/clang-r383902.tar.gz" -C "${TC_DIR}/clang-primary"
+          rm -f "${TC_DIR}/clang-r383902.tar.gz"
+          echo "::endgroup::"
+
+          test -x "${TC_DIR}/clang-primary/bin/clang"
+          test -x "${TC_DIR}/clang-primary/bin/ld.lld"
+
           "${TC_DIR}/clang-primary/bin/clang" --version
           "${TC_DIR}/clang-primary/bin/ld.lld" --version || true
 
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v28" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v29" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -825,17 +840,35 @@ jobs:
           done
 
           if [ -n "${FOUND_MK}" ]; then
-            if ! grep -q 'Wno-error=strict-prototypes' "${FOUND_MK}"; then
+            if ! grep -q 'Wno-strict-prototypes' "${FOUND_MK}"; then
               cat >> "${FOUND_MK}" <<'EOF'
-          # Samsung SM7325 vendor camera compat for modern clang
-          subdir-ccflags-y += $(call cc-disable-warning, strict-prototypes)
-          subdir-ccflags-y += -Wno-error=strict-prototypes
+          # THE GOD'S FIX - GIAI ĐOẠN 1: TRIỆT TIÊU ĐỆ QUY KBUILD_CFLAGS
+          # Không dùng 'subdir-ccflags-y += $(call cc-disable-warning...)' vì nó sẽ gây đệ quy KBUILD_CFLAGS.
+          ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
           EOF
               echo "::notice::Injected camera compat flags into ${FOUND_MK}"
             fi
           else
             echo "::warning::No camera Makefile found to inject strict-prototypes guard"
           fi
+
+      - name: Patch Techpack Camera Makefiles (Bypass Missing Files)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd kernel
+          
+          # THE GOD'S FIX - GIAI ĐOẠN 2: LỪA TECHPACK CAMERA BẰNG LỆNH SED
+          # Bọn vendor code cẩu thả hardcode cp ../../system/ (thành ra ngoài Github Workspace)
+          # Hoặc cp với biến $(camera_adaptive_mipi) rỗng. 
+          # Ta dùng lệnh sed biến chúng thành test -f ... || true để nó nhắm mắt cho qua!
+          
+          echo "::notice::Patching camera_adaptive_mipi copy rule"
+          find techpack/camera -type f -name Makefile -exec sed -i 's/cp $(CAMERA_KERNEL_PATH)\/$(camera_adaptive_mipi_source) $(camera_adaptive_mipi)/[ -n "$(camera_adaptive_mipi)" ] \&\& cp $(CAMERA_KERNEL_PATH)\/$(camera_adaptive_mipi_source) $(camera_adaptive_mipi) || true/g' {} +
+          find techpack/camera -type f -name Makefile -exec sed -i 's/cp $(camera_adaptive_mipi_source) $(camera_adaptive_mipi)/[ -n "$(camera_adaptive_mipi)" ] \&\& cp $(camera_adaptive_mipi_source) $(camera_adaptive_mipi) || true/g' {} +
+          
+          echo "::notice::Patching perflog.h copy rule"
+          find techpack/camera drivers fs -type f -name Makefile -exec sed -i 's#cp \(.*system/.*/perflog\.h\)#test -f \1 \&\& cp \1 \|\| true#g' {} +
 
       - name: Materialize SUSFS kernel-side patchset
         if: ${{ github.event.inputs.feature_profile == 'full' }}
@@ -1021,18 +1054,6 @@ jobs:
           cat > "${GITHUB_WORKSPACE}/build-kernel.sh" <<'EOF'
           set -euxo pipefail
           cd "${GITHUB_WORKSPACE}/kernel"
-          
-          # =========================================================================
-          # THE GOD'S FIX - GIAI ĐOẠN 2: LỪA TECHPACK CAMERA BẰNG AOSP DUMMY TREE
-          # =========================================================================
-          # Claude bảo không có bằng chứng? Log fail trước đó đã in rõ mồn một:
-          # cp: cannot stat '../../system/core/liblog/include/log/perflog.h'
-          # Bọn vendor hardcode đường dẫn từ ../../system. Ta BẮT BUỘC phải tạo dummy tree này!
-          
-          mkdir -p "${GITHUB_WORKSPACE}/system/core/liblog/include/log"
-          mkdir -p "${GITHUB_WORKSPACE}/system/logging/liblog/include/log"
-          touch "${GITHUB_WORKSPACE}/system/core/liblog/include/log/perflog.h"
-          touch "${GITHUB_WORKSPACE}/system/logging/liblog/include/log/perflog.h"
 
           mkdir -p "$CCACHE_DIR"
           export USE_CCACHE=1
@@ -1061,9 +1082,6 @@ jobs:
             rm -rf "$out_dir"
             mkdir -p "$out_dir"
 
-            # KCFLAGS="-Wno-error" là đủ để vô hiệu hóa Cảnh báo biến thành Lỗi một cách an toàn
-            # Đưa trở lại HOSTCC, HOSTCXX để tránh sử dụng công cụ ld.gold mặc định của Ubuntu 22.04 gây lỗi cho scripts
-            # Bỏ khai báo LLVM=1 để tránh Kbuild 5.4 hiểu lầm thành 1clang.
             COMMON_ARGS=(
               -C "$PWD"
               O="$out_dir"
@@ -1084,7 +1102,7 @@ jobs:
               CLANG_TRIPLE="aarch64-linux-gnu-"
               CROSS_COMPILE="$CROSS_COMPILE"
               CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
-              KCFLAGS="-Wno-error -Wno-unused-function"
+              KCFLAGS="-Wno-error"
               HOSTLDFLAGS="-fuse-ld=bfd"
             )
 
@@ -1251,12 +1269,20 @@ jobs:
         run: |
           set +e
           echo "::group::compile-errors"
-          for f in "${GITHUB_WORKSPACE}"/*.log; do
-            [ -f "$f" ] || continue
-            echo ">>> Inspecting log file: $(basename "$f")"
-            tail -n 100 "$f"
-            echo "----------------------------------------"
-          done
+          LOG_COUNT=$(ls "${GITHUB_WORKSPACE}"/*.log 2>/dev/null | wc -l)
+          if [ "$LOG_COUNT" -eq 0 ]; then
+            echo ">>> ❌ KHÔNG TÌM THẤY LOG BIÊN DỊCH NÀO!"
+            echo ">>> Cảnh báo: Lỗi đã xảy ra TRƯỚC KHI quá trình Build Kernel bắt đầu."
+            echo ">>> (Ví dụ: Tải Toolchain thất bại, Clone Kernel lỗi, Patch thất bại...)."
+            echo ">>> Hãy mở rộng các bước bị đánh dấu ❌ (màu đỏ) ở trên trong giao diện Github Actions để xem chi tiết."
+          else
+            for f in "${GITHUB_WORKSPACE}"/*.log; do
+              [ -f "$f" ] || continue
+              echo ">>> Inspecting log file: $(basename "$f")"
+              tail -n 100 "$f"
+              echo "----------------------------------------"
+            done
+          fi
           echo "::endgroup::"
           
           {
