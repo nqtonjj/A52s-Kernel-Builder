@@ -1169,7 +1169,7 @@ MKEOF
 
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" .
 
-          DTB_DIR="${{ steps.cfg.outputs.out_dir }}/arch/arch/arm64/boot/dts/vendor/qcom"
+          DTB_DIR="${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dts/vendor/qcom"
           DTB_FILE=""
           case "${{ github.event.inputs.region }}" in
             eur) DTB_FILE="sm7325-a52sxq_eur_open.dtb" ;;
