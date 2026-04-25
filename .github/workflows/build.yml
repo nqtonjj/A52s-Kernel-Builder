@@ -240,11 +240,12 @@ jobs:
           for f in KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig; do
             [ -f "$f" ] && sed -i '/kpm\/Kconfig/d' "$f" || true
           done
-          while IFS= read -r f; do[ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             sed -i '/kpm\/kpm\.h/d' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'kpm/kpm.h' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"[ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
+          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
+          [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
           mkdir -p "${KSU_REAL_DIR}/kpm"
           cat > "${KSU_REAL_DIR}/kpm/kpm.h" <<'EOF'
           #ifndef __SUKISU_KPM_H
@@ -259,7 +260,7 @@ jobs:
           EOF
 
           echo "::notice::Patching pgtable.h to mm.h"
-          while IFS= read -r f; do[ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null || true)
 
@@ -288,7 +289,7 @@ jobs:
           done < <(grep -RIlE '\bTWA_RESUME\b|\bTWA_SIGNAL\b|\bTWA_SIGNAL_NO_IPI\b|\bTWA_NONE\b' KernelSU drivers/kernelsu 2>/dev/null || true)
 
           echo "::notice::Patching global task_work API for Samsung Linux 5.4"
-          while IFS= read -r f; do[ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
@@ -302,7 +303,7 @@ jobs:
           for i, line in enumerate(lines):
               if line.startswith('#include '):
                   insert_at = i + 1
-          to_add =[]
+          to_add = []
           if need_task_work and '#include <linux/task_work.h>' not in s:
               to_add.append('#include <linux/task_work.h>')
           if need_sched_task and '#include <linux/sched/task.h>' not in s:
@@ -374,6 +375,7 @@ jobs:
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
+
           p = Path(sys.argv[1])
           s = p.read_text()
           original = s
@@ -422,7 +424,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do[ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           int ksu_app_profile_init(void) { return 0; }
@@ -430,7 +432,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do[ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           int ksu_rules_init(void) { return 0; }
@@ -438,7 +440,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do[ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           #include "sepolicy.h"
@@ -482,7 +484,8 @@ jobs:
           EOF
 
           echo "::notice::Injecting dedicated link-fix object for stripped SukiSU exports"
-          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"[ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
+          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
+          [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
 
           cat > "${KSU_REAL_DIR}/ksu_compat_linkfix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
@@ -498,7 +501,8 @@ jobs:
           __attribute__((weak)) int update_root_profile(void) { return 0; }
           EOF
 
-          for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do[ -f "$mk" ] || continue
+          for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
+            [ -f "$mk" ] || continue
             grep -q 'ksu_compat_linkfix\.o' "$mk" || printf '\nobj-$(CONFIG_KSU) += ksu_compat_linkfix.o\n' >> "$mk"
           done
 
@@ -529,28 +533,28 @@ jobs:
                   p.write_text(s)
                   print(f"Patched {filepath}")
 
-          patch_file('fs/exec.c',[
+          patch_file('fs/exec.c', [
               ('static int do_execveat_common(int fd, struct filename *filename,', 
                '#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\nstatic int do_execveat_common(int fd, struct filename *filename,'),
               ('return __do_execve_file(fd, filename, argv, envp, flags, NULL);',
                '#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);')
           ])
 
-          patch_file('fs/open.c',[
+          patch_file('fs/open.c', [
               ('long do_faccessat(int dfd, const char __user *filename, int mode)',
                '#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\nlong do_faccessat(int dfd, const char __user *filename, int mode)'),
               ('if (mode & ~S_IRWXO)',
                '#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\tif (mode & ~S_IRWXO)')
           ])
 
-          patch_file('fs/read_write.c',[
+          patch_file('fs/read_write.c', [
               ('ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)',
                '#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\nssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)'),
               ('if (!(file->f_mode & FMODE_READ))',
                '#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n\n\tif (!(file->f_mode & FMODE_READ))')
           ])
 
-          patch_file('fs/stat.c',[
+          patch_file('fs/stat.c', [
               ('int vfs_statx(int dfd, const char __user *filename, int flags,',
                '#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\nint vfs_statx(int dfd, const char __user *filename, int flags,'),
               ('int vfs_fstatat(int dfd, const char __user *filename, struct kstat *stat,',
@@ -561,14 +565,14 @@ jobs:
                'unsigned int lookup_flags = 0;\n#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif')
           ])
 
-          patch_file('drivers/input/input.c',[
+          patch_file('drivers/input/input.c', [
               ('static void input_handle_event(struct input_dev *dev,',
                '#ifdef CONFIG_KSU\nextern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif\nstatic void input_handle_event(struct input_dev *dev,'),
               ('int disposition = input_get_disposition(dev, type, code, &value);',
                'int disposition = input_get_disposition(dev, type, code, &value);\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_input_hook))\n\t\tksu_handle_input_handle_event(&type, &code, &value);\n#endif')
           ])
 
-          patch_file('fs/devpts/inode.c',[
+          patch_file('fs/devpts/inode.c', [
               ('void *devpts_get_priv(struct dentry *dentry)',
                '#ifdef CONFIG_KSU\nextern int ksu_handle_devpts(struct inode*);\n#endif\nvoid *devpts_get_priv(struct dentry *dentry)'),
               ('if (dentry->d_sb->s_magic != DEVPTS_SUPER_MAGIC)',
@@ -661,13 +665,13 @@ jobs:
             fi
           done
 
-          if[ -n "${CAMERA_MK}" ]; then
+          if [ -n "${CAMERA_MK}" ]; then
             if ! grep -q 'Wno-strict-prototypes' "${CAMERA_MK}"; then
               cat >> "${CAMERA_MK}" <<'MKEOF'
 
-ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
-ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
-MKEOF
+          ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
+          ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
+          MKEOF
             fi
           fi
 
@@ -741,7 +745,7 @@ MKEOF
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
           
           grep -q 'susfs\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
-          if[ -f "fs/sus_su.c" ]; then
+          if [ -f "fs/sus_su.c" ]; then
             grep -q 'sus_su\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS_SUS_SU) += sus_su.o' >> fs/Makefile
           fi
 
@@ -811,7 +815,7 @@ MKEOF
           disable_cfg CONFIG_KPM
           disable_cfg CONFIG_KSU_DEBUG
 
-          if[ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
+          if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
             for key in \
               CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
               CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
@@ -1007,7 +1011,7 @@ MKEOF
 
           flash_boot;
           
-          if [ -f dtbo.img ] &&[ -e /dev/block/by-name/dtbo ]; then
+          if [ -f dtbo.img ] && [ -e /dev/block/by-name/dtbo ]; then
             ui_print "Flashing DTBO..."
             dd if=dtbo.img of=/dev/block/by-name/dtbo bs=1048576 2>/dev/null || true
           fi
