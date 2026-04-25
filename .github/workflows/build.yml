@@ -21,13 +21,13 @@ on:
         required: true
         default: "A52s-SukiSU-Ultra-SUSFS"
       security_mode:
-        description: "Samsung security mode"
+        description: "Samsung security mode (Aggressive is MANDATORY for boot)"
         required: true
         type: choice
-        default: "minimal"
+        default: "aggressive"
         options:
-          - minimal
           - aggressive
+          - minimal
       feature_profile:
         description: "Boot triage profile"
         required: true
@@ -129,14 +129,10 @@ jobs:
           AVAILABLE_GB="$(df --output=avail -BG / | tail -n1 | tr -dc '0-9')"
           echo "Available disk after cleanup: ${AVAILABLE_GB}GB"
           if [ "${AVAILABLE_GB}" -lt 22 ]; then
-            echo "::warning::Disk after cleanup is below 22GB. Build may still work but margin is lower than the Holy 4th Law ideal."
+            echo "::warning::Disk after cleanup is below 22GB."
           else
-            echo "::notice::Disk cleanup succeeded with ${AVAILABLE_GB}GB available. Conforming to the Holy 4th Law."
+            echo "::notice::Disk cleanup succeeded with ${AVAILABLE_GB}GB available."
           fi
-
-          echo "::group::disk-after"
-          df -h
-          echo "::endgroup::"
 
       - name: Install build dependencies
         shell: bash
@@ -146,39 +142,12 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           sudo apt-get update
           sudo apt-get install -y \
-            bc \
-            binutils \
-            bison \
-            build-essential \
-            ccache \
-            cpio \
-            curl \
-            device-tree-compiler \
-            file \
-            flex \
-            gawk \
-            git \
-            jq \
-            libelf-dev \
-            libssl-dev \
-            libncurses-dev \
-            lz4 \
-            liblz4-tool \
-            pahole \
-            patch \
-            python3 \
-            rsync \
-            unzip \
-            xz-utils \
-            zip \
-            zstd \
-            binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabi \
-            gcc \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            g++
-          gcc --version || true
+            bc binutils bison build-essential ccache cpio curl \
+            device-tree-compiler file flex gawk git jq libelf-dev \
+            libssl-dev libncurses-dev lz4 liblz4-tool pahole patch \
+            python3 rsync unzip xz-utils zip zstd \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            gcc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi g++
 
       - name: Setup AOSP Clang 11 (Google Direct)
         shell: bash
@@ -188,28 +157,14 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           
           mkdir -p "${TC_DIR}/clang-primary"
-          
-          echo "::group::Download AOSP Clang from Google Source"
-          curl -L --fail --retry 5 --retry-delay 3 \
-            "${AOSP_CLANG_URL}" \
-            -o "${TC_DIR}/clang-r383902.tar.gz"
-          echo "::endgroup::"
-
-          echo "::group::Extract Toolchain"
+          curl -L --fail --retry 5 --retry-delay 3 "${AOSP_CLANG_URL}" -o "${TC_DIR}/clang-r383902.tar.gz"
           tar -xzf "${TC_DIR}/clang-r383902.tar.gz" -C "${TC_DIR}/clang-primary"
           rm -f "${TC_DIR}/clang-r383902.tar.gz"
-          echo "::endgroup::"
-
-          test -x "${TC_DIR}/clang-primary/bin/clang"
-          test -x "${TC_DIR}/clang-primary/bin/ld.lld"
-
-          "${TC_DIR}/clang-primary/bin/clang" --version
-          "${TC_DIR}/clang-primary/bin/ld.lld" --version || true
 
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v35" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v36" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -218,7 +173,6 @@ jobs:
           key: ${{ runner.os }}-ccache-sm7325-${{ steps.cache_key.outputs.suffix }}
           restore-keys: |
             ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-
-            ${{ runner.os }}-ccache-sm7325-${{ github.event.inputs.kernel_branch }}-
             ${{ runner.os }}-ccache-sm7325-
 
       - name: Clone A52s kernel source
@@ -230,16 +184,12 @@ jobs:
           git clone --depth=1 --filter=blob:none -b "${{ github.event.inputs.kernel_branch }}" "${KERNEL_REPO}" kernel
           cd kernel
           git log --oneline -1 | tee "${GITHUB_WORKSPACE}/kernel_commit.txt"
-          git submodule status || true
-          test -d arch/arm64/configs/vendor
 
       - name: Resolve A52s defconfig
         id: cfg
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/03-defconfig-resolve.log"
-          exec > >(tee -a "${LOG}") 2>&1
           case "${{ github.event.inputs.region }}" in
             eur) DEFCONFIG="a52sxq_eur_open_defconfig" ;;
             chn) DEFCONFIG="a52sxq_chn_tw_defconfig" ;;
@@ -247,7 +197,6 @@ jobs:
             *) echo "::error::Unsupported region"; exit 1 ;;
           esac
           DEFCONFIG_PATH="kernel/arch/arm64/configs/vendor/${DEFCONFIG}"
-          test -f "${DEFCONFIG_PATH}"
           echo "defconfig=${DEFCONFIG}" >> "${GITHUB_OUTPUT}"
           echo "defconfig_path=${DEFCONFIG_PATH}" >> "${GITHUB_OUTPUT}"
           echo "out_dir=${GITHUB_WORKSPACE}/out" >> "${GITHUB_OUTPUT}"
@@ -257,67 +206,23 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04-sukisu-integrate.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
-
           rm -rf KernelSU drivers/kernelsu
           git config --global advice.detachedHead false
-
           git clone --filter=blob:none --no-checkout "${SUKISU_REPO}" KernelSU
           git -C KernelSU fetch --depth=256 origin main
           git -C KernelSU checkout "${SUKISU_REF}" || {
             git -C KernelSU fetch --depth=2048 origin main
             git -C KernelSU checkout "${SUKISU_REF}"
           }
-
-          test -d KernelSU/kernel
-          test -f KernelSU/kernel/Makefile
-          test -f KernelSU/kernel/Kconfig
-
           ln -snf "$(realpath --relative-to=drivers "$(pwd)/KernelSU/kernel")" drivers/kernelsu
-
           sed -i '/kernelsu\//d' drivers/Makefile
           printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
-
           sed -i '/drivers\/kernelsu\/Kconfig/d' drivers/Kconfig
           if grep -q '^endmenu$' drivers/Kconfig; then
             sed -i '/^endmenu$/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           else
             printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
-          fi
-          
-          grep -q 'config KSU_MANUAL_HOOK' KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig 2>/dev/null \
-            || echo "::warning::CONFIG_KSU_MANUAL_HOOK not found in Kconfig — manual hook may be silently ignored"
-
-          git -C KernelSU rev-parse HEAD | tee "${GITHUB_WORKSPACE}/sukisu_commit.txt"
-
-          test -L drivers/kernelsu
-          grep -q 'kernelsu/' drivers/Makefile
-          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
-
-      - name: Verify SukiSU version supports SUSFS
-        if: ${{ github.event.inputs.feature_profile == 'full' }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd kernel
-          echo "::group::Checking SukiSU for SUSFS required functions"
-          REQUIRED_FUNCS=("ksu_handle_vfs_read" "ksu_handle_faccessat")
-          MISSING=0
-          for func in "${REQUIRED_FUNCS[@]}"; do
-            if grep -rq "\\b${func}\\b" --include="*.c" --include="*.h" drivers/kernelsu/ KernelSU/kernel/ 2>/dev/null; then
-              echo "  [✓] Found: ${func}"
-            else
-              echo "  [✗] Missing: ${func}"
-              MISSING=1
-            fi
-          done
-          echo "::endgroup::"
-          if [ $MISSING -eq 1 ]; then
-            echo "::warning::This SukiSU version lacks some required functions for full SUSFS support. SUSFS might rely on weak stubs."
-          else
-            echo "::notice::SukiSU version appears to fully support SUSFS."
           fi
 
       - name: Apply non-interactive SukiSU compatibility patches
@@ -325,8 +230,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04b-sukisu-compat.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
           echo "::notice::Patching KPM"
@@ -337,13 +240,11 @@ jobs:
           for f in KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig; do
             [ -f "$f" ] && sed -i '/kpm\/Kconfig/d' "$f" || true
           done
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do[ -f "$f" ] || continue
             sed -i '/kpm\/kpm\.h/d' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'kpm/kpm.h' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
-          [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
+          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"[ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
           mkdir -p "${KSU_REAL_DIR}/kpm"
           cat > "${KSU_REAL_DIR}/kpm/kpm.h" <<'EOF'
           #ifndef __SUKISU_KPM_H
@@ -358,8 +259,7 @@ jobs:
           EOF
 
           echo "::notice::Patching pgtable.h to mm.h"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do[ -f "$f" ] || continue
             sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null || true)
 
@@ -388,36 +288,29 @@ jobs:
           done < <(grep -RIlE '\bTWA_RESUME\b|\bTWA_SIGNAL\b|\bTWA_SIGNAL_NO_IPI\b|\bTWA_NONE\b' KernelSU drivers/kernelsu 2>/dev/null || true)
 
           echo "::notice::Patching global task_work API for Samsung Linux 5.4"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do[ -f "$f" ] || continue
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-
           p = Path(sys.argv[1])
           s = p.read_text()
           original = s
-
           need_task_work = 'task_work_add(' in s or 'init_task_work(' in s
           need_sched_task = 'put_task_struct' in s
-
           lines = s.splitlines()
           insert_at = 0
           for i, line in enumerate(lines):
               if line.startswith('#include '):
                   insert_at = i + 1
-
-          to_add = []
+          to_add =[]
           if need_task_work and '#include <linux/task_work.h>' not in s:
               to_add.append('#include <linux/task_work.h>')
           if need_sched_task and '#include <linux/sched/task.h>' not in s:
               to_add.append('#include <linux/sched/task.h>')
-
           if to_add:
               for inc in reversed(to_add):
                   lines.insert(insert_at, inc)
               s = '\n'.join(lines) + '\n'
-
           if s != original:
               p.write_text(s)
           PY
@@ -481,11 +374,9 @@ jobs:
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-
           p = Path(sys.argv[1])
           s = p.read_text()
           original = s
-
           macro_injection = """
           /* KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS */
           #ifndef KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS
@@ -506,7 +397,6 @@ jobs:
           #endif
           #endif
           """
-          
           if 'KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS' not in s:
               lines = s.splitlines()
               insert_idx = 0
@@ -515,7 +405,6 @@ jobs:
                       insert_idx = i + 1
               lines.insert(insert_idx, macro_injection)
               s = '\n'.join(lines) + '\n'
-
           if s != original:
               p.write_text(s)
           PY
@@ -533,8 +422,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do[ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           int ksu_app_profile_init(void) { return 0; }
@@ -542,8 +430,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do[ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           int ksu_rules_init(void) { return 0; }
@@ -551,8 +438,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do[ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           #include "sepolicy.h"
@@ -596,12 +482,10 @@ jobs:
           EOF
 
           echo "::notice::Injecting dedicated link-fix object for stripped SukiSU exports"
-          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
-          [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
+          KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"[ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
 
           cat > "${KSU_REAL_DIR}/ksu_compat_linkfix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
-
           __attribute__((weak)) int escape_to_root_for_init(void) { return 0; }
           __attribute__((weak)) int escape_with_root_profile(void) { return 0; }
           __attribute__((weak)) int apply_kernelsu_rules(void) { return 0; }
@@ -614,8 +498,7 @@ jobs:
           __attribute__((weak)) int update_root_profile(void) { return 0; }
           EOF
 
-          for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
-            [ -f "$mk" ] || continue
+          for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do[ -f "$mk" ] || continue
             grep -q 'ksu_compat_linkfix\.o' "$mk" || printf '\nobj-$(CONFIG_KSU) += ksu_compat_linkfix.o\n' >> "$mk"
           done
 
@@ -624,8 +507,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04d-sukisu-manual-hooks.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
           echo "::notice::Applying manual hook patches to fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, drivers/input/input.c, fs/devpts/inode.c, and fs/namespace.c"
@@ -648,28 +529,28 @@ jobs:
                   p.write_text(s)
                   print(f"Patched {filepath}")
 
-          patch_file('fs/exec.c', [
+          patch_file('fs/exec.c',[
               ('static int do_execveat_common(int fd, struct filename *filename,', 
                '#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\nstatic int do_execveat_common(int fd, struct filename *filename,'),
               ('return __do_execve_file(fd, filename, argv, envp, flags, NULL);',
                '#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);')
           ])
 
-          patch_file('fs/open.c', [
+          patch_file('fs/open.c',[
               ('long do_faccessat(int dfd, const char __user *filename, int mode)',
                '#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\nlong do_faccessat(int dfd, const char __user *filename, int mode)'),
               ('if (mode & ~S_IRWXO)',
                '#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\tif (mode & ~S_IRWXO)')
           ])
 
-          patch_file('fs/read_write.c', [
+          patch_file('fs/read_write.c',[
               ('ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)',
                '#ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif\nssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)'),
               ('if (!(file->f_mode & FMODE_READ))',
                '#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n\n\tif (!(file->f_mode & FMODE_READ))')
           ])
 
-          patch_file('fs/stat.c', [
+          patch_file('fs/stat.c',[
               ('int vfs_statx(int dfd, const char __user *filename, int flags,',
                '#ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif\nint vfs_statx(int dfd, const char __user *filename, int flags,'),
               ('int vfs_fstatat(int dfd, const char __user *filename, struct kstat *stat,',
@@ -680,14 +561,14 @@ jobs:
                'unsigned int lookup_flags = 0;\n#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif')
           ])
 
-          patch_file('drivers/input/input.c', [
+          patch_file('drivers/input/input.c',[
               ('static void input_handle_event(struct input_dev *dev,',
                '#ifdef CONFIG_KSU\nextern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif\nstatic void input_handle_event(struct input_dev *dev,'),
               ('int disposition = input_get_disposition(dev, type, code, &value);',
                'int disposition = input_get_disposition(dev, type, code, &value);\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_input_hook))\n\t\tksu_handle_input_handle_event(&type, &code, &value);\n#endif')
           ])
 
-          patch_file('fs/devpts/inode.c', [
+          patch_file('fs/devpts/inode.c',[
               ('void *devpts_get_priv(struct dentry *dentry)',
                '#ifdef CONFIG_KSU\nextern int ksu_handle_devpts(struct inode*);\n#endif\nvoid *devpts_get_priv(struct dentry *dentry)'),
               ('if (dentry->d_sb->s_magic != DEVPTS_SUPER_MAGIC)',
@@ -740,11 +621,9 @@ jobs:
           echo "::notice::Exporting sys_call_table for non-GKI SukiSU"
           if grep -q "sys_call_table" arch/arm64/kernel/sys.c && ! grep -q "EXPORT_SYMBOL.*sys_call_table" arch/arm64/kernel/sys.c; then
               echo -e "\n#include <linux/export.h>\nEXPORT_SYMBOL(sys_call_table);" >> arch/arm64/kernel/sys.c
-              echo "Exported sys_call_table in arch/arm64/kernel/sys.c"
           fi
           if grep -q "sys_call_table" arch/arm64/kernel/sys32.c 2>/dev/null && ! grep -q "EXPORT_SYMBOL.*sys_call_table" arch/arm64/kernel/sys32.c 2>/dev/null; then
               echo -e "\n#include <linux/export.h>\nEXPORT_SYMBOL(sys_call_table);" >> arch/arm64/kernel/sys32.c
-              echo "Exported sys_call_table in arch/arm64/kernel/sys32.c"
           fi
 
       - name: Apply optional guarded touchscreen DEFEX stub
@@ -752,11 +631,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04c-touch-defex-stub.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
-
-          echo "::notice::Applying guarded DEFEX stub only to touchscreen driver call-sites"
           find drivers/input/touchscreen -type f -name '*.c' 2>/dev/null \
             | while IFS= read -r f; do
                 grep -qE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' "$f" || continue
@@ -772,19 +647,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04cc-camera-proto.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
-
-          # ============================================================
-          # ROOT CAUSE FIX:
-          # KHÔNG patch C file. Chỉ dùng ccflags-y ở Makefile
-          # và KCFLAGS ở build command để suppress strict-prototypes warning.
-          # ============================================================
-
-          echo "::notice::Injecting camera Makefile ccflags (NO C-file patching)"
-
-          # Tìm Makefile camera gần nhất để inject ccflags-y
           CAMERA_MK=""
           for mk in \
             techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/Makefile \
@@ -794,55 +657,33 @@ jobs:
           do
             if [ -f "${mk}" ]; then
               CAMERA_MK="${mk}"
-              echo "::notice::Found camera Makefile: ${mk}"
               break
             fi
           done
 
-          if [ -n "${CAMERA_MK}" ]; then
+          if[ -n "${CAMERA_MK}" ]; then
             if ! grep -q 'Wno-strict-prototypes' "${CAMERA_MK}"; then
               cat >> "${CAMERA_MK}" <<'MKEOF'
 
-# A52s Builder: Suppress strict-prototypes for Samsung vendor camera code
-# (Samsung cam_sysfs_init.c has thousands of legacy K&R-style empty param lists)
-# Do NOT use subdir-ccflags-y here — it propagates KBUILD_CFLAGS recursively.
 ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
 ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
 MKEOF
-              echo "::notice::Injected camera compat ccflags into ${CAMERA_MK}"
-            else
-              echo "::notice::Camera compat ccflags already present, skipping."
             fi
-          else
-            echo "::warning::No camera Makefile found. Will rely on global KCFLAGS only."
           fi
 
-          # Áp dụng tương tự cho tất cả Makefile trong techpack/camera (phòng thủ sâu)
           find techpack/camera -maxdepth 4 -type f -name Makefile 2>/dev/null \
             | while IFS= read -r mk; do
                 grep -q 'Wno-strict-prototypes' "${mk}" && continue
                 printf '\nccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes\n' >> "${mk}"
-                echo "  ccflags injected: ${mk}"
               done
-
-          echo "::notice::Camera ccflags injection complete."
 
       - name: Patch Techpack Camera Makefiles (Bypass Missing Files)
         shell: bash
         run: |
           set -euxo pipefail
           cd kernel
-          
-          # THE GOD'S FIX - GIAI ĐOẠN 2: LỪA TECHPACK CAMERA BẰNG LỆNH SED
-          # Bọn vendor code cẩu thả hardcode cp ../../system/ (thành ra ngoài Github Workspace)
-          # Hoặc cp với biến $(camera_adaptive_mipi) rỗng. 
-          # Ta dùng lệnh sed biến chúng thành test -f ... || true để nó nhắm mắt cho qua!
-          
-          echo "::notice::Patching camera_adaptive_mipi copy rule"
           find techpack/camera -type f -name Makefile -exec sed -i 's/cp $(CAMERA_KERNEL_PATH)\/$(camera_adaptive_mipi_source) $(camera_adaptive_mipi)/[ -n "$(camera_adaptive_mipi)" ] \&\& cp $(CAMERA_KERNEL_PATH)\/$(camera_adaptive_mipi_source) $(camera_adaptive_mipi) || true/g' {} +
           find techpack/camera -type f -name Makefile -exec sed -i 's/cp $(camera_adaptive_mipi_source) $(camera_adaptive_mipi)/[ -n "$(camera_adaptive_mipi)" ] \&\& cp $(camera_adaptive_mipi_source) $(camera_adaptive_mipi) || true/g' {} +
-          
-          echo "::notice::Patching perflog.h copy rule"
           find techpack/camera drivers fs -type f -name Makefile -exec sed -i 's#cp \(.*system/.*/perflog\.h\)#test -f \1 \&\& cp \1 \|\| true#g' {} +
 
       - name: Materialize SUSFS kernel-side patchset
@@ -850,8 +691,6 @@ MKEOF
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
           rm -rf ../susfs4ksu
@@ -860,8 +699,7 @@ MKEOF
           cp -fv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
 
           SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
-          test -n "${SUSFS_KERNEL_PATCH}"
-
+          
           auto_fix_fd_proc_reject() {
             local rej="fs/proc/fd.c.rej"
             local target="fs/proc/fd.c"
@@ -881,8 +719,6 @@ MKEOF
           \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
           #endif
                 }' "$target"
-              else
-                return 1
               fi
             fi
             if ! grep -q '#include <linux/susfs.h>' "$target"; then
@@ -896,34 +732,23 @@ MKEOF
             git apply --unsafe-paths "$SUSFS_KERNEL_PATCH"
           else
             set +e
-            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
-            PATCH_RC=${PIPESTATUS[0]}
+            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH"
             set -e
             auto_fix_fd_proc_reject || true
-
-            REJ_COUNT="$(find . -name '*.rej' | wc -l | tr -d ' ')"
-            if [ "$REJ_COUNT" != "0" ]; then
-              echo "::warning::${REJ_COUNT} .rej file(s) remain. Force-wiping to proceed safely."
-              find . -name '*.rej' -delete
-            fi
+            find . -name '*.rej' -delete
           fi
 
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
-          test -f include/linux/susfs.h
-          test -f fs/susfs.c
           
           grep -q 'susfs\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
-          if [ -f "fs/sus_su.c" ]; then
+          if[ -f "fs/sus_su.c" ]; then
             grep -q 'sus_su\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS_SUS_SU) += sus_su.o' >> fs/Makefile
           fi
-          echo "::notice::SUSFS Makefile entry verified."
 
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/06-defconfig-patch.log"
-          exec > >(tee -a "${LOG}") 2>&1
           DEFCONFIG="${{ steps.cfg.outputs.defconfig_path }}"
           PROFILE="${{ github.event.inputs.feature_profile }}"
 
@@ -939,7 +764,6 @@ MKEOF
             printf '%s=y\n' "$key" >> "$DEFCONFIG"
           }
 
-          # 1. Tắt sạch các cờ KSU/KPM/KPROBES mặc định
           for key in \
             CONFIG_KSU \
             CONFIG_KSU_MANUAL_HOOK \
@@ -957,26 +781,23 @@ MKEOF
 
           enable_cfg CONFIG_KALLSYMS
 
-          # 2. Cấu hình theo Profile
           case "$PROFILE" in
             baseline_noroot)
-              echo "::warning::Profile baseline_noroot selected. KernelSU and SUSFS remain disabled."
+              echo "::warning::Profile baseline_noroot selected."
               ;;
             ksu_nosusfs)
-              echo "::warning::Profile ksu_nosusfs selected. Enabling manual-hook KernelSU without SUSFS."
               enable_cfg CONFIG_KSU
               enable_cfg CONFIG_KSU_MANUAL_HOOK
-              disable_cfg CONFIG_KSU_MANUAL_SU # THE GOD'S FIX: Tắt trên 5.4 Non-GKI
+              disable_cfg CONFIG_KSU_MANUAL_SU
               disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
               disable_cfg CONFIG_KSU_NONE_HOOK
               disable_cfg CONFIG_KPROBES
               ;;
             full)
-              echo "::warning::Profile full selected. Enabling manual-hook KernelSU with SUSFS."
               enable_cfg CONFIG_KSU
               enable_cfg CONFIG_KSU_MANUAL_HOOK
               enable_cfg CONFIG_KSU_SUSFS
-              disable_cfg CONFIG_KSU_MANUAL_SU # THE GOD'S FIX: Tắt trên 5.4 Non-GKI
+              disable_cfg CONFIG_KSU_MANUAL_SU
               disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
               disable_cfg CONFIG_KSU_NONE_HOOK
               disable_cfg CONFIG_KPROBES
@@ -990,9 +811,7 @@ MKEOF
           disable_cfg CONFIG_KPM
           disable_cfg CONFIG_KSU_DEBUG
 
-          # 3. Xử lý Samsung Security
-          if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
-            echo "::warning::Aggressive mode: Strip Samsung security branches"
+          if[ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
             for key in \
               CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
               CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
@@ -1013,32 +832,18 @@ MKEOF
             do
               disable_cfg "$key"
             done
-          else
-            echo "::notice::Minimal mode: Keep ALL stock Samsung security configurations (KNOX, TIMA, DEFEX, etc.)"
           fi
-
-          echo "::group::Defconfig flags ($PROFILE)"
-          grep -E 'CONFIG_KSU|CONFIG_KPM|CONFIG_KPROBES|KALLSYMS|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING' "$DEFCONFIG" || true
-          echo "::endgroup::"
 
       - name: Build kernel
         id: build
         shell: bash
         run: |
           set -euxo pipefail
-          
           cd kernel
 
           cat > "${GITHUB_WORKSPACE}/build-kernel.sh" <<'EOF'
           set -euxo pipefail
           cd "${GITHUB_WORKSPACE}/kernel"
-          
-          # =========================================================================
-          # THE GOD'S FIX - GIAI ĐOẠN 2: LỪA TECHPACK CAMERA BẰNG AOSP DUMMY TREE
-          # =========================================================================
-          # Claude bảo không có bằng chứng? Log fail trước đó đã in rõ mồn một:
-          # cp: cannot stat '../../system/core/liblog/include/log/perflog.h'
-          # Bọn vendor hardcode đường dẫn từ ../../system. Ta BẮT BUỘC phải tạo dummy tree này!
           
           mkdir -p "${GITHUB_WORKSPACE}/system/core/liblog/include/log"
           mkdir -p "${GITHUB_WORKSPACE}/system/logging/liblog/include/log"
@@ -1055,8 +860,7 @@ MKEOF
           export KBUILD_BUILD_USER="samsung"
           export KBUILD_BUILD_HOST="localbuild"
 
-          STOCK_LV="$(grep '^CONFIG_LOCALVERSION=' "arch/arm64/configs/vendor/${DEFCONFIG}" \
-            | cut -d= -f2 | tr -d '"' || true)"
+          STOCK_LV="$(grep '^CONFIG_LOCALVERSION=' "arch/arm64/configs/vendor/${DEFCONFIG}" | cut -d= -f2 | tr -d '"' || true)"
           export LOCALVERSION="${STOCK_LV:-}"
 
           export CROSS_COMPILE="aarch64-linux-gnu-"
@@ -1096,22 +900,17 @@ MKEOF
               KCFLAGS="-Wno-error -Wno-strict-prototypes -Wno-implicit-function-declaration -Wno-unused-function -Wno-misleading-indentation"
             )
 
-            echo "::group::Make Defconfig [${tag}]"
             set +e
             make "${COMMON_ARGS[@]}" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
-            local BUILD_RC
-            BUILD_RC="${PIPESTATUS[0]}"
+            local BUILD_RC=${PIPESTATUS[0]}
             set -e
-            echo "::endgroup::"
             
             [ "${BUILD_RC}" -eq 0 ] || return "${BUILD_RC}"
 
-            echo "::group::Make Kernel [${tag}]"
             set +e
             make "${COMMON_ARGS[@]}" -j"$(nproc --all)" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
-            BUILD_RC="${PIPESTATUS[0]}"
+            BUILD_RC=${PIPESTATUS[0]}
             set -e
-            echo "::endgroup::"
             
             return "${BUILD_RC}"
           }
@@ -1121,22 +920,12 @@ MKEOF
           elif build_once "aosp-clang-11-ias0" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "0"; then
             echo "toolchain=aosp-clang-11-ias0" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::All toolchain attempts failed! Scroll up and expand the 'Make Defconfig' or 'Make Kernel' groups above to see the REAL error."
             exit 1
           fi
 
           if [ ! -s "${OUT_DIR}/arch/arm64/boot/Image" ]; then
-            echo "::error::Kernel Image was not generated or is empty!"
             exit 1
           fi
-
-          IMAGE_SIZE=$(stat -c%s "${OUT_DIR}/arch/arm64/boot/Image")
-          if [ "$IMAGE_SIZE" -lt 10000000 ]; then
-            echo "::error::Kernel Image is suspiciously small ($IMAGE_SIZE bytes)!"
-            exit 1
-          fi
-          echo "::notice::Kernel Image built successfully ($IMAGE_SIZE bytes)."
-
           EOF
 
           chmod +x "${GITHUB_WORKSPACE}/build-kernel.sh"
@@ -1151,8 +940,6 @@ MKEOF
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/09b-source-pack.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
           TAR_NAME="patched-kernel-source-${{ github.event.inputs.region }}-$(date +%Y%m%d-%H%M).tar.zst"
           tar --exclude='.git' -I 'zstd -19 -T0' -cf "${GITHUB_WORKSPACE}/${TAR_NAME}" .
@@ -1164,9 +951,6 @@ MKEOF
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/10-pack.log"
-          exec > >(tee -a "${LOG}") 2>&1
-          
           git clone --depth=1 --filter=blob:none "$ANYKERNEL_REPO" AnyKernel3
           cd AnyKernel3
 
@@ -1182,23 +966,16 @@ MKEOF
 
           if [ -f "${DTB_DIR}/${DTB_FILE}" ]; then
             cp -v "${DTB_DIR}/${DTB_FILE}" ./dtb
-            echo "::notice::Copied main DTB: ${DTB_FILE}"
           else
             DTB_COUNT=$(find "${DTB_DIR}" -name "sm7325-a52sxq*.dtb" 2>/dev/null | wc -l || echo 0)
             if [ "$DTB_COUNT" -eq 1 ]; then
               cp -v "${DTB_DIR}"/sm7325-a52sxq*.dtb ./dtb
-              echo "::warning::Using fallback DTB file."
-            else
-              echo "::warning::Could not locate a unique DTB file. DTB will not be included."
             fi
           fi
 
           DTBO_FILE="${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img"
           if [ -f "${DTBO_FILE}" ]; then
             cp -v "${DTBO_FILE}" ./dtbo.img
-            echo "::notice::Copied DTBO image."
-          else
-            echo "::warning::No dtbo.img found, it might be bundled in dtb."
           fi
 
           cat > anykernel.sh <<'EOF'
@@ -1230,7 +1007,7 @@ MKEOF
 
           flash_boot;
           
-          if [ -f dtbo.img ] && [ -e /dev/block/by-name/dtbo ]; then
+          if [ -f dtbo.img ] &&[ -e /dev/block/by-name/dtbo ]; then
             ui_print "Flashing DTBO..."
             dd if=dtbo.img of=/dev/block/by-name/dtbo bs=1048576 2>/dev/null || true
           fi
@@ -1238,10 +1015,6 @@ MKEOF
 
           cd ..
           
-          # THE GOD'S FIX - GIAI ĐOẠN 3: CẮT BỎ KHỐI U 200MB MODULES
-          # Đã thiến hoàn toàn lệnh copy .ko rác rưởi vào AnyKernel3.
-          # Zip giờ đây chỉ chứa Image + DTB, đảm bảo chuẩn 20MB.
-
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
@@ -1254,23 +1027,6 @@ MKEOF
         shell: bash
         run: |
           set +e
-          echo "::group::compile-errors"
-          LOG_COUNT=$(ls "${GITHUB_WORKSPACE}"/*.log 2>/dev/null | wc -l)
-          if [ "$LOG_COUNT" -eq 0 ]; then
-            echo ">>> ❌ KHÔNG TÌM THẤY LOG BIÊN DỊCH NÀO!"
-            echo ">>> Cảnh báo: Lỗi đã xảy ra TRƯỚC KHI quá trình Build Kernel bắt đầu."
-            echo ">>> (Ví dụ: Tải Toolchain thất bại, Clone Kernel lỗi, Patch thất bại...)."
-            echo ">>> Hãy mở rộng các bước bị đánh dấu ❌ (màu đỏ) ở trên trong giao diện Github Actions để xem chi tiết."
-          else
-            for f in "${GITHUB_WORKSPACE}"/*.log; do
-              [ -f "$f" ] || continue
-              echo ">>> Inspecting log file: $(basename "$f")"
-              tail -n 100 "$f"
-              echo "----------------------------------------"
-            done
-          fi
-          echo "::endgroup::"
-          
           {
             echo "## Compile Error Report"
             echo '```text'
