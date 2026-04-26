@@ -203,7 +203,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v51" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v52" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -1137,8 +1137,26 @@ jobs:
           mkdir -p extracted
           if [ "${EROFS_MAGIC}" = "e2e1f5e0" ] || echo "${FS_TYPE_HINT}" | grep -q 'erofs'; then
             FORMAT=erofs
-            extract.erofs -i vendor.raw -x -o extracted >/dev/null
-            ROOT_DIR="$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)"
+            # Try extractors in order of preference. Ubuntu's erofs-utils
+            # ships fsck.erofs and dump.erofs; extract.erofs is AOSP-only.
+            EXTRACT_DEST="extracted/vendor"
+            mkdir -p "${EXTRACT_DEST}"
+            if command -v fsck.erofs >/dev/null 2>&1 && fsck.erofs --help 2>&1 | grep -q -- '--extract'; then
+              echo "Using fsck.erofs --extract"
+              fsck.erofs --extract="${EXTRACT_DEST}" vendor.raw
+            elif command -v extract.erofs >/dev/null 2>&1; then
+              echo "Using extract.erofs"
+              extract.erofs -i vendor.raw -x -o extracted >/dev/null
+              EXTRACT_DEST="$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)"
+            else
+              echo "Falling back to kernel EROFS mount"
+              mkdir -p mnt_erofs
+              sudo mount -t erofs -o loop,ro vendor.raw mnt_erofs
+              sudo cp -a mnt_erofs/. "${EXTRACT_DEST}/"
+              sudo umount mnt_erofs
+              sudo chown -R "$(id -u):$(id -g)" "${EXTRACT_DEST}" || true
+            fi
+            ROOT_DIR="${EXTRACT_DEST}"
           elif [ "${EXT4_MAGIC_LE}" = "53ef" ] || echo "${FS_TYPE_HINT}" | grep -qE 'ext[234]'; then
             FORMAT=ext4
             mkdir -p mnt_vendor
