@@ -203,7 +203,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v50" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v51" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -1122,22 +1122,31 @@ jobs:
           ORIG_SIZE="$(stat -c%s vendor.raw)"
           echo "Stock vendor raw size: ${ORIG_SIZE}"
 
-          # 3. Detect EROFS vs ext4 (A52s ships ext4, but UN1CA may differ)
-          FS_TYPE="$(file vendor.raw | tr '[:upper:]' '[:lower:]')"
-          echo "Detected: ${FS_TYPE}"
+          # 3. Detect EROFS vs ext4 by reading magic bytes directly.
+          #    Ubuntu's libmagic doesn't always recognize EROFS, so we don't
+          #    rely on the `file` command.
+          #      - EROFS super magic = 0xE0F5E1E2 little-endian @ offset 1024
+          #      - ext4 super magic  = 0xEF53      little-endian @ offset 1080
+          EROFS_MAGIC="$(xxd -s 1024 -l 4 -p vendor.raw 2>/dev/null || true)"
+          EXT4_MAGIC_LE="$(xxd -s 1080 -l 2 -p vendor.raw 2>/dev/null || true)"
+          FS_TYPE_HINT="$(file vendor.raw | tr '[:upper:]' '[:lower:]' || true)"
+          echo "EROFS magic@1024: ${EROFS_MAGIC}"
+          echo "ext4  magic@1080: ${EXT4_MAGIC_LE}"
+          echo "file(1) hint:     ${FS_TYPE_HINT}"
 
           mkdir -p extracted
-          if echo "${FS_TYPE}" | grep -q 'erofs'; then
+          if [ "${EROFS_MAGIC}" = "e2e1f5e0" ] || echo "${FS_TYPE_HINT}" | grep -q 'erofs'; then
             FORMAT=erofs
             extract.erofs -i vendor.raw -x -o extracted >/dev/null
             ROOT_DIR="$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)"
-          elif echo "${FS_TYPE}" | grep -qE 'ext[234]'; then
+          elif [ "${EXT4_MAGIC_LE}" = "53ef" ] || echo "${FS_TYPE_HINT}" | grep -qE 'ext[234]'; then
             FORMAT=ext4
             mkdir -p mnt_vendor
             sudo mount -o loop,rw vendor.raw mnt_vendor
             ROOT_DIR="mnt_vendor"
           else
-            echo "::error::Unsupported vendor filesystem: ${FS_TYPE}"
+            echo "::error::Unsupported vendor filesystem (no EROFS or ext4 magic detected)"
+            echo "::error::EROFS magic@1024='${EROFS_MAGIC}' ext4 magic@1080='${EXT4_MAGIC_LE}' file='${FS_TYPE_HINT}'"
             exit 1
           fi
           echo "Root dir: ${ROOT_DIR}"
