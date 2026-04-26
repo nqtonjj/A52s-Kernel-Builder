@@ -37,11 +37,20 @@ on:
           - baseline_noroot
           - ksu_nosusfs
           - full
-      touch_defex_stub:
-        description: "Patch DEFEX call-sites in touchscreen drivers"
+      un1ca_zip_url:
+        description: "URL to the UN1CA flashable ZIP for a52sxq (drive/gofile public link). Used to extract stock vendor_dlkm.img for module repack."
+        required: true
+        default: ""
+      build_vendor_dlkm:
+        description: "Build patched vendor_dlkm.img (required if SUSFS struct patch makes touch/wifi modules CRC-incompatible)."
         required: true
         type: boolean
         default: true
+      touch_defex_stub:
+        description: "Patch DEFEX call-sites in touchscreen drivers (no-op for A52s)"
+        required: true
+        type: boolean
+        default: false
       upload_patched_source:
         description: "Upload patched source tarball"
         required: true
@@ -147,11 +156,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc binutils bison build-essential ccache cpio curl \
-            device-tree-compiler file flex gawk git jq libelf-dev \
+            device-tree-compiler file flex gawk git jq kmod libelf-dev \
             libssl-dev libncurses-dev lz4 liblz4-tool pahole patch \
-            python3 rsync unzip xz-utils zip zstd \
+            python3 python3-pip rsync unzip xz-utils zip zstd \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
-            gcc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi g++
+            gcc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi g++ \
+            android-sdk-libsparse-utils erofs-utils
+          # avbtool from AOSP for vbmeta-disabled.img
+          if ! command -v avbtool >/dev/null 2>&1; then
+            git clone --depth=1 \
+              https://android.googlesource.com/platform/external/avb \
+              "${GITHUB_WORKSPACE}/avb_tools"
+            sudo install -m 0755 \
+              "${GITHUB_WORKSPACE}/avb_tools/avbtool.py" \
+              /usr/local/bin/avbtool
+          fi
+          avbtool version || true
           gcc --version || true
 
       - name: Setup AOSP Clang 11 (Google Direct)
@@ -183,7 +203,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v37" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v40" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -700,23 +720,6 @@ jobs:
               echo -e "\n#include <linux/export.h>\nEXPORT_SYMBOL(sys_call_table);" >> arch/arm64/kernel/sys32.c
           fi
 
-      - name: Apply optional guarded touchscreen DEFEX stub
-        if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd kernel
-          find drivers/input/touchscreen -type f -name '*.c' 2>/dev/null \
-            | while IFS= read -r f; do
-                grep -qE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' "$f" || continue
-                sed -i \
-                  -e 's/task_defex_syscall_catch([^;)]*)/0/g' \
-                  -e 's/defex_check([^;)]*)/0/g' \
-                  -e 's/five_check([^;)]*)/0/g' \
-                  -e 's/defex_allow([^;)]*)/0/g' \
-                  "$f"
-              done
-
       - name: Patch legacy camera Makefile (NO C-file patching - safe ccflags only)
         shell: bash
         run: |
@@ -737,11 +740,11 @@ jobs:
 
           if [ -n "${CAMERA_MK}" ]; then
             if ! grep -q 'Wno-strict-prototypes' "${CAMERA_MK}"; then
-              cat >> "${CAMERA_MK}" <<'MKEOF'
-
-          ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
-          ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
-          MKEOF
+              {
+                echo ''
+                echo 'ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes'
+                echo 'ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration'
+              } >> "${CAMERA_MK}"
             fi
           fi
 
@@ -986,6 +989,19 @@ jobs:
             BUILD_RC=${PIPESTATUS[0]}
             set -e
             
+            [ "${BUILD_RC}" -eq 0 ] || return "${BUILD_RC}"
+            
+            # NEW: install modules with stripped debug info into modules_out/
+            # so vendor_dlkm repack and depmod can pick them up cleanly.
+            set +e
+            make "${COMMON_ARGS[@]}" \
+                 INSTALL_MOD_PATH="${out_dir}/modules_out" \
+                 INSTALL_MOD_STRIP=1 \
+                 -j"$(nproc --all)" modules_install \
+                 2>&1 | tee "${GITHUB_WORKSPACE}/09b-modules-install-${tag}.log"
+            BUILD_RC=${PIPESTATUS[0]}
+            set -e
+            
             return "${BUILD_RC}"
           }
 
@@ -1000,6 +1016,7 @@ jobs:
           if [ ! -s "${OUT_DIR}/arch/arm64/boot/Image" ]; then
             exit 1
           fi
+          
           EOF
 
           chmod +x "${GITHUB_WORKSPACE}/build-kernel.sh"
@@ -1019,32 +1036,20 @@ jobs:
           tar --exclude='.git' -I 'zstd -19 -T0' -cf "${GITHUB_WORKSPACE}/${TAR_NAME}" .
           echo "tar_name=${TAR_NAME}" >> "${GITHUB_OUTPUT}"
 
-      - name: Prepare AnyKernel3 package with DTB/DTBO
+      - name: Prepare AnyKernel3 (kernel only)
         if: ${{ success() }}
         id: pack
         shell: bash
         run: |
           set -euxo pipefail
+
           git clone --depth=1 --filter=blob:none "$ANYKERNEL_REPO" AnyKernel3
           cd AnyKernel3
-
           cp "${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/Image" .
 
           DTB_DIR="${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dts/vendor/qcom"
-          DTB_FILE=""
-          case "${{ github.event.inputs.region }}" in
-            eur) DTB_FILE="sm7325-a52sxq_eur_open.dtb" ;;
-            chn) DTB_FILE="sm7325-a52sxq_chn_tw.dtb" ;;
-            kor) DTB_FILE="sm7325-a52sxq_kor_single.dtb" ;;
-          esac
-
-          if [ -f "${DTB_DIR}/${DTB_FILE}" ]; then
-            cp -v "${DTB_DIR}/${DTB_FILE}" ./dtb
-          else
-            DTB_COUNT=$(find "${DTB_DIR}" -name "sm7325-a52sxq*.dtb" 2>/dev/null | wc -l || echo 0)
-            if [ "$DTB_COUNT" -eq 1 ]; then
-              cp -v "${DTB_DIR}"/sm7325-a52sxq*.dtb ./dtb
-            fi
+          if ls "${DTB_DIR}"/sm7325-a52sxq*.dtb 1> /dev/null 2>&1; then
+            cp -v "${DTB_DIR}"/sm7325-a52sxq*.dtb ./dtb
           fi
 
           DTBO_FILE="${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img"
@@ -1053,9 +1058,6 @@ jobs:
           fi
 
           cat > anykernel.sh <<'EOF'
-          ## AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
-
           properties() { '
           kernel.string=${{ github.event.inputs.kernel_name }} [${{ github.event.inputs.feature_profile }}]
           do.devicecheck=0
@@ -1066,35 +1068,253 @@ jobs:
           device.name1=a52sxq
           device.name2=a52sxqzt
           device.name3=a52sxqks
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
           '; }
-
           BLOCK=/dev/block/by-name/boot;
-          IS_SLOT_DEVICE=0;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-
-          . tools/ak3-core.sh;
-          split_boot;
-
-          flash_boot;
-          
+          IS_SLOT_DEVICE=0; RAMDISK_COMPRESSION=auto; PATCH_VBMETA_FLAG=auto;
+          . tools/ak3-core.sh; split_boot; flash_boot;
           if [ -f dtbo.img ] && [ -e /dev/block/by-name/dtbo ]; then
             ui_print "Flashing DTBO..."
             dd if=dtbo.img of=/dev/block/by-name/dtbo bs=1048576 2>/dev/null || true
           fi
           EOF
 
+          ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-AK3.zip"
+          zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*.gitignore'
           cd ..
-          
-          ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
-          (
-            cd AnyKernel3
-            zip -r9 "../$ZIP_NAME" . -x '.git/*' '.github/*' 'README.md' '*.gitignore'
-          )
+
           echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Repack vendor_dlkm.img with new kernel modules
+        if: ${{ success() && (github.event.inputs.build_vendor_dlkm == 'true' || github.event.inputs.build_vendor_dlkm == true) }}
+        id: vdlkm
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          UN1CA_URL="${{ github.event.inputs.un1ca_zip_url }}"
+          if [ -z "${UN1CA_URL}" ]; then
+            echo "::error::un1ca_zip_url is required when build_vendor_dlkm=true"
+            exit 1
+          fi
+
+          OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
+          MODOUT="${OUT_DIR}/modules_out/lib/modules"
+          if ! ls -d "${MODOUT}"/*/ >/dev/null 2>&1; then
+            echo "::error::No modules under ${MODOUT}. Did make modules_install run?"
+            exit 1
+          fi
+
+          # 1. Pull stock UN1CA flashable zip and extract vendor_dlkm.img
+          mkdir -p un1ca_dl
+          cd un1ca_dl
+          echo "::group::Downloading UN1CA zip"
+          curl -L --fail --retry 5 --retry-delay 5 -o un1ca.zip "${UN1CA_URL}"
+          echo "::endgroup::"
+
+          echo "::group::Locate vendor_dlkm in UN1CA payload"
+          # UN1CA flashable zip contains images/ or payload, locate vendor_dlkm.img
+          unzip -l un1ca.zip | tee un1ca_listing.txt
+          VENDOR_DLKM_PATH="$(awk 'tolower($NF) ~ /vendor_dlkm\.img(\.lz4)?$/ {print $NF; exit}' un1ca_listing.txt)"
+          if [ -z "${VENDOR_DLKM_PATH}" ]; then
+            echo "::error::No vendor_dlkm.img found in UN1CA zip"
+            exit 1
+          fi
+          echo "Found: ${VENDOR_DLKM_PATH}"
+          unzip -j -o un1ca.zip "${VENDOR_DLKM_PATH}" -d .
+          BASENAME="$(basename "${VENDOR_DLKM_PATH}")"
+          if [[ "${BASENAME}" == *.lz4 ]]; then
+            lz4 -d -f "${BASENAME}" vendor_dlkm.img
+          else
+            mv -f "${BASENAME}" vendor_dlkm.img
+          fi
+          echo "::endgroup::"
+
+          # 2. Convert sparse to raw if needed
+          if file vendor_dlkm.img | grep -qi 'sparse'; then
+            simg2img vendor_dlkm.img vendor_dlkm.raw
+          else
+            cp vendor_dlkm.img vendor_dlkm.raw
+          fi
+          ORIG_SIZE="$(stat -c%s vendor_dlkm.raw)"
+          echo "Stock vendor_dlkm raw size: ${ORIG_SIZE}"
+
+          # 3. Detect EROFS vs ext4
+          FS_TYPE="$(file vendor_dlkm.raw | tr '[:upper:]' '[:lower:]')"
+          echo "Detected: ${FS_TYPE}"
+
+          mkdir -p extracted
+          if echo "${FS_TYPE}" | grep -q 'erofs'; then
+            FORMAT=erofs
+            extract.erofs -i vendor_dlkm.raw -x -o extracted >/dev/null
+            ROOT_DIR="$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)"
+          elif echo "${FS_TYPE}" | grep -qE 'ext[234]'; then
+            FORMAT=ext4
+            mkdir -p mnt_dlkm
+            sudo mount -o loop,rw vendor_dlkm.raw mnt_dlkm
+            ROOT_DIR="mnt_dlkm"
+          else
+            echo "::error::Unsupported vendor_dlkm filesystem: ${FS_TYPE}"
+            exit 1
+          fi
+          echo "Root dir: ${ROOT_DIR}"
+          echo "format=${FORMAT}" >> "$GITHUB_OUTPUT"
+
+          # 4. Locate the modules directory inside vendor_dlkm
+          MOD_PARENT="$(sudo find "${ROOT_DIR}" -type d -name modules | head -n1)"
+          if [ -z "${MOD_PARENT}" ]; then
+            echo "::error::No lib/modules directory in vendor_dlkm"
+            sudo umount mnt_dlkm 2>/dev/null || true
+            exit 1
+          fi
+          VER_SUBDIR="$(sudo find "${MOD_PARENT}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+          [ -n "${VER_SUBDIR}" ] || VER_SUBDIR="${MOD_PARENT}"
+          echo "Module subdir: ${VER_SUBDIR}"
+
+          # 5. Whitelist of touch + wifi + critical modules to swap
+          # Touch chain (from TWRP a52sxq device tree):
+          #   sec_cmd, sec_common_fn, sec_secure_touch, sec_tclm_v2,
+          #   sec_tsp_dumpkey, sec_tsp_log, stm_ts
+          # Wifi (qcacld-3.0): wlan, qca_cld3, cnss2, cnss_nl
+          WANTED=(
+            sec_cmd sec_common_fn sec_secure_touch sec_tclm_v2
+            sec_tsp_dumpkey sec_tsp_log stm_ts
+            wlan qca_cld3 cnss2 cnss_nl
+            cfg80211 mac80211
+          )
+
+          REPLACED=()
+          for m in "${WANTED[@]}"; do
+            NEW_KO="$(find "${MODOUT}" -name "${m}.ko" -print -quit 2>/dev/null || true)"
+            OLD_KO="$(sudo find "${VER_SUBDIR}" -name "${m}.ko" -print -quit 2>/dev/null || true)"
+            if [ -z "${NEW_KO}" ]; then
+              echo "::warning::built kernel does not contain ${m}.ko (CONFIG may differ)"
+              continue
+            fi
+            if [ -z "${OLD_KO}" ]; then
+              echo "::warning::stock vendor_dlkm has no ${m}.ko (skip)"
+              continue
+            fi
+            sudo cp -fv "${NEW_KO}" "${OLD_KO}"
+            REPLACED+=("${m}")
+          done
+          echo "Replaced modules: ${REPLACED[*]}"
+
+          # 6. Sanity: 7 touch modules MUST be present after replacement
+          MUST=(sec_cmd sec_common_fn sec_secure_touch sec_tclm_v2 sec_tsp_dumpkey sec_tsp_log stm_ts)
+          MISSING=()
+          for m in "${MUST[@]}"; do
+            sudo test -f "${VER_SUBDIR}/${m}.ko" || MISSING+=("${m}")
+          done
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::missing required touch module(s): ${MISSING[*]}"
+            sudo umount mnt_dlkm 2>/dev/null || true
+            exit 1
+          fi
+
+          # 7. depmod offline (regenerate modules.dep / modules.alias / modules.softdep)
+          KVERS="$(basename "${VER_SUBDIR}")"
+          if [[ "${KVERS}" =~ ^[0-9]+\.[0-9]+ ]]; then
+            sudo depmod -b "${ROOT_DIR}" -F "${OUT_DIR}/System.map" "${KVERS}" || true
+          else
+            # Some Samsung builds use non-version dirname; depmod -e on the dir
+            sudo depmod -b "${ROOT_DIR}" -e -F "${OUT_DIR}/System.map" || true
+          fi
+
+          # 8. Repack
+          if [ "${FORMAT}" = erofs ]; then
+            mkfs.erofs -z lz4hc,12 -T 1230768000 \
+                       vendor_dlkm-patched.img "${ROOT_DIR}"
+          else
+            sudo umount mnt_dlkm
+            cp vendor_dlkm.raw vendor_dlkm-patched.img
+            sudo e2fsck -fy vendor_dlkm-patched.img || true
+          fi
+
+          # 9. Pad to original block size (or larger) so super partition slot fits
+          NEW_SIZE="$(stat -c%s vendor_dlkm-patched.img)"
+          if [ "${NEW_SIZE}" -lt "${ORIG_SIZE}" ]; then
+            truncate -s "${ORIG_SIZE}" vendor_dlkm-patched.img
+            echo "Padded patched image to ${ORIG_SIZE} bytes"
+          fi
+
+          mv vendor_dlkm-patched.img "${GITHUB_WORKSPACE}/"
+          cd "${GITHUB_WORKSPACE}"
+
+          # 10. Build vbmeta-disabled.img (AVB flag = VERIFICATION_DISABLED)
+          # Flag value 2 disables full chain verification on Samsung A52s.
+          avbtool make_vbmeta_image \
+            --flags 2 \
+            --padding_size 4096 \
+            --output vbmeta-disabled.img
+
+          ls -lh vendor_dlkm-patched.img vbmeta-disabled.img
+
+          echo "vendor_dlkm_name=vendor_dlkm-patched.img" >> "$GITHUB_OUTPUT"
+          echo "vbmeta_name=vbmeta-disabled.img" >> "$GITHUB_OUTPUT"
+
+      - name: Generate FLASH instructions
+        if: ${{ success() && steps.vdlkm.outputs.vendor_dlkm_name != '' }}
+        shell: bash
+        run: |
+          cat > "${GITHUB_WORKSPACE}/FLASH_INSTRUCTIONS.md" <<'EOF'
+          # Samsung A52s — Flash Instructions (SukiSU + SUSFS build)
+
+          You will flash THREE artifacts:
+
+          1. `*-AK3.zip`            — kernel Image + DTB/DTBO (AnyKernel3, flash via TWRP/OrangeFox)
+          2. `vendor_dlkm-patched.img` — UN1CA stock vendor_dlkm.img with rebuilt
+                                       touch + wifi modules whose CRC matches
+                                       this kernel (flash via fastboot)
+          3. `vbmeta-disabled.img`  — empty vbmeta with VERIFICATION_DISABLED flag,
+                                       required so AVB does not reject the patched
+                                       vendor_dlkm.img (flash via fastboot)
+
+          ## Prerequisites
+          - Bootloader UNLOCKED. Knox warranty bit is permanently 0x1 once you flash.
+          - You are running UN1CA matching the URL you supplied to this workflow.
+          - You have TWRP / OrangeFox installed.
+          - Pin > 50%, original USB cable.
+
+          ## Procedure (single-slot A52s, no _a/_b)
+
+          ```
+          adb reboot bootloader
+
+          fastboot --disable-verity --disable-verification flash vbmeta vbmeta-disabled.img
+          fastboot flash vendor_dlkm vendor_dlkm-patched.img
+          fastboot reboot recovery
+
+          # In TWRP / OrangeFox:
+          #   Install -> select <kernel-name>-<region>-AK3.zip
+          #   Wipe -> Dalvik / ART cache
+          #   Reboot system
+          ```
+
+          ## Verifying after boot
+          ```
+          adb shell uname -r          # Should show your custom LOCALVERSION suffix
+          adb shell lsmod | grep -E 'stm_ts|sec_input'   # Touch modules loaded
+          adb shell getenforce        # Should be Enforcing
+          adb shell dmesg | grep -iE 'disagrees about version|version magic'
+          # ^ MUST be empty. Any output here means CRC mismatch is back.
+          ```
+
+          ## Rolling back
+          - Flash UN1CA stock vendor_dlkm.img and stock vbmeta.img via fastboot.
+          - Flash UN1CA boot.img (or any stock kernel) via fastboot/Odin.
+
+          ## Troubleshooting
+          - **No touch after boot**: confirm `lsmod` shows stm_ts. If empty,
+            CRC still off. Check Action logs for the warning lines emitted
+            by the "Repack vendor_dlkm" step listing which modules were
+            actually replaced. Make sure your build's CONFIG matches stock
+            modules expected (check defconfig vs UN1CA).
+          - **Bootloop on first boot**: flash stock vbmeta.img to re-enable
+            verity, then flash stock vendor_dlkm.img and stock kernel.
+          - **Banking apps still detect root**: that is unrelated to this
+            kernel build and is fixed in userspace (Shamiko + random KSU
+            manager package + Tricky Store keybox).
+          EOF
 
       - name: Smart error report
         if: ${{ failure() }}
@@ -1122,4 +1342,28 @@ jobs:
         with:
           name: ${{ steps.pack.outputs.zip_name }}
           path: ${{ github.workspace }}/${{ steps.pack.outputs.zip_name }}
+          if-no-files-found: error
+
+      - name: Upload patched vendor_dlkm.img
+        if: ${{ success() && steps.vdlkm.outputs.vendor_dlkm_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor_dlkm-patched
+          path: ${{ github.workspace }}/${{ steps.vdlkm.outputs.vendor_dlkm_name }}
+          if-no-files-found: error
+
+      - name: Upload vbmeta-disabled.img
+        if: ${{ success() && steps.vdlkm.outputs.vbmeta_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vbmeta-disabled
+          path: ${{ github.workspace }}/${{ steps.vdlkm.outputs.vbmeta_name }}
+          if-no-files-found: error
+
+      - name: Upload FLASH instructions
+        if: ${{ success() && steps.vdlkm.outputs.vendor_dlkm_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: FLASH_INSTRUCTIONS
+          path: ${{ github.workspace }}/FLASH_INSTRUCTIONS.md
           if-no-files-found: error
