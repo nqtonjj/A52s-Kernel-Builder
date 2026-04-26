@@ -21,13 +21,13 @@ on:
         required: true
         default: "A52s-SukiSU-Ultra-SUSFS"
       security_mode:
-        description: "Samsung security mode"
+        description: "Samsung security mode (Aggressive is MANDATORY for boot)"
         required: true
         type: choice
-        default: "minimal"
+        default: "aggressive"
         options:
-          - minimal
           - aggressive
+          - minimal
       feature_profile:
         description: "Boot triage profile"
         required: true
@@ -37,6 +37,11 @@ on:
           - baseline_noroot
           - ksu_nosusfs
           - full
+      touch_defex_stub:
+        description: "Patch DEFEX call-sites in touchscreen drivers"
+        required: true
+        type: boolean
+        default: true
       upload_patched_source:
         description: "Upload patched source tarball"
         required: true
@@ -141,38 +146,12 @@ jobs:
           exec > >(tee -a "${LOG}") 2>&1
           sudo apt-get update
           sudo apt-get install -y \
-            bc \
-            binutils \
-            bison \
-            build-essential \
-            ccache \
-            cpio \
-            curl \
-            device-tree-compiler \
-            file \
-            flex \
-            gawk \
-            git \
-            jq \
-            libelf-dev \
-            libssl-dev \
-            libncurses-dev \
-            lz4 \
-            liblz4-tool \
-            pahole \
-            patch \
-            python3 \
-            rsync \
-            unzip \
-            xz-utils \
-            zip \
-            zstd \
-            binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabi \
-            gcc \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            g++
+            bc binutils bison build-essential ccache cpio curl \
+            device-tree-compiler file flex gawk git jq libelf-dev \
+            libssl-dev libncurses-dev lz4 liblz4-tool pahole patch \
+            python3 rsync unzip xz-utils zip zstd \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            gcc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi g++
           gcc --version || true
 
       - name: Setup AOSP Clang 11 (Google Direct)
@@ -332,8 +311,7 @@ jobs:
           for f in KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig; do
             [ -f "$f" ] && sed -i '/kpm\/Kconfig/d' "$f" || true
           done
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             sed -i '/kpm\/kpm\.h/d' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' 'kpm/kpm.h' KernelSU drivers/kernelsu 2>/dev/null || true)
 
@@ -353,8 +331,7 @@ jobs:
           EOF
 
           echo "::notice::Patching pgtable.h to mm.h"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null || true)
 
@@ -383,36 +360,29 @@ jobs:
           done < <(grep -RIlE '\bTWA_RESUME\b|\bTWA_SIGNAL\b|\bTWA_SIGNAL_NO_IPI\b|\bTWA_NONE\b' KernelSU drivers/kernelsu 2>/dev/null || true)
 
           echo "::notice::Patching global task_work API for Samsung Linux 5.4"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-
           p = Path(sys.argv[1])
           s = p.read_text()
           original = s
-
           need_task_work = 'task_work_add(' in s or 'init_task_work(' in s
           need_sched_task = 'put_task_struct' in s
-
           lines = s.splitlines()
           insert_at = 0
           for i, line in enumerate(lines):
               if line.startswith('#include '):
                   insert_at = i + 1
-
           to_add = []
           if need_task_work and '#include <linux/task_work.h>' not in s:
               to_add.append('#include <linux/task_work.h>')
           if need_sched_task and '#include <linux/sched/task.h>' not in s:
               to_add.append('#include <linux/sched/task.h>')
-
           if to_add:
               for inc in reversed(to_add):
                   lines.insert(insert_at, inc)
               s = '\n'.join(lines) + '\n'
-
           if s != original:
               p.write_text(s)
           PY
@@ -476,11 +446,9 @@ jobs:
             python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-
           p = Path(sys.argv[1])
           s = p.read_text()
           original = s
-
           macro_injection = """
           /* KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS */
           #ifndef KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS
@@ -501,7 +469,6 @@ jobs:
           #endif
           #endif
           """
-          
           if 'KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS' not in s:
               lines = s.splitlines()
               insert_idx = 0
@@ -510,7 +477,6 @@ jobs:
                       insert_idx = i + 1
               lines.insert(insert_idx, macro_injection)
               s = '\n'.join(lines) + '\n'
-
           if s != original:
               p.write_text(s)
           PY
@@ -528,8 +494,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           int ksu_app_profile_init(void) { return 0; }
@@ -537,8 +502,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           int ksu_rules_init(void) { return 0; }
@@ -546,8 +510,7 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
+          while IFS= read -r f; do [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
           #include "sepolicy.h"
@@ -596,7 +559,6 @@ jobs:
 
           cat > "${KSU_REAL_DIR}/ksu_compat_linkfix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
-
           __attribute__((weak)) int escape_to_root_for_init(void) { return 0; }
           __attribute__((weak)) int escape_with_root_profile(void) { return 0; }
           __attribute__((weak)) int apply_kernelsu_rules(void) { return 0; }
@@ -619,8 +581,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04d-sukisu-manual-hooks.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
           echo "::notice::Applying manual hook patches to fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, drivers/input/input.c, fs/devpts/inode.c, and fs/namespace.c"
@@ -735,25 +695,33 @@ jobs:
           echo "::notice::Exporting sys_call_table for non-GKI SukiSU"
           if grep -q "sys_call_table" arch/arm64/kernel/sys.c && ! grep -q "EXPORT_SYMBOL.*sys_call_table" arch/arm64/kernel/sys.c; then
               echo -e "\n#include <linux/export.h>\nEXPORT_SYMBOL(sys_call_table);" >> arch/arm64/kernel/sys.c
-              echo "Exported sys_call_table in arch/arm64/kernel/sys.c"
           fi
           if grep -q "sys_call_table" arch/arm64/kernel/sys32.c 2>/dev/null && ! grep -q "EXPORT_SYMBOL.*sys_call_table" arch/arm64/kernel/sys32.c 2>/dev/null; then
               echo -e "\n#include <linux/export.h>\nEXPORT_SYMBOL(sys_call_table);" >> arch/arm64/kernel/sys32.c
-              echo "Exported sys_call_table in arch/arm64/kernel/sys32.c"
           fi
 
-      # ĐÃ XÓA SỔ BƯỚC "Apply optional guarded touchscreen DEFEX stub" Ở ĐÂY. KHÔNG CÒN GÂY HẠI CẢM ỨNG NỮA!
+      - name: Apply optional guarded touchscreen DEFEX stub
+        if: ${{ github.event.inputs.touch_defex_stub == 'true' || github.event.inputs.touch_defex_stub == true }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd kernel
+          find drivers/input/touchscreen -type f -name '*.c' 2>/dev/null \
+            | while IFS= read -r f; do
+                grep -qE 'task_defex_syscall_catch|defex_check|five_check|defex_allow' "$f" || continue
+                sed -i \
+                  -e 's/task_defex_syscall_catch([^;)]*)/0/g' \
+                  -e 's/defex_check([^;)]*)/0/g' \
+                  -e 's/five_check([^;)]*)/0/g' \
+                  -e 's/defex_allow([^;)]*)/0/g' \
+                  "$f"
+              done
 
       - name: Patch legacy camera Makefile (NO C-file patching - safe ccflags only)
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04cc-camera-proto.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
-
-          echo "::notice::Injecting camera Makefile ccflags (NO C-file patching)"
-
           CAMERA_MK=""
           for mk in \
             techpack/camera/drivers/cam_sensor_module/cam_sensor_utils/Makefile \
@@ -763,7 +731,6 @@ jobs:
           do
             if [ -f "${mk}" ]; then
               CAMERA_MK="${mk}"
-              echo "::notice::Found camera Makefile: ${mk}"
               break
             fi
           done
@@ -772,38 +739,25 @@ jobs:
             if ! grep -q 'Wno-strict-prototypes' "${CAMERA_MK}"; then
               cat >> "${CAMERA_MK}" <<'MKEOF'
 
-# A52s Builder: Suppress strict-prototypes for Samsung vendor camera code
-ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
-ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
-MKEOF
-              echo "::notice::Injected camera compat ccflags into ${CAMERA_MK}"
-            else
-              echo "::notice::Camera compat ccflags already present, skipping."
+          ccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes
+          ccflags-y += -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration
+          MKEOF
             fi
-          else
-            echo "::warning::No camera Makefile found. Will rely on global KCFLAGS only."
           fi
 
           find techpack/camera -maxdepth 4 -type f -name Makefile 2>/dev/null \
             | while IFS= read -r mk; do
                 grep -q 'Wno-strict-prototypes' "${mk}" && continue
                 printf '\nccflags-y += -Wno-strict-prototypes -Wno-error=strict-prototypes\n' >> "${mk}"
-                echo "  ccflags injected: ${mk}"
               done
-
-          echo "::notice::Camera ccflags injection complete."
 
       - name: Patch Techpack Camera Makefiles (Bypass Missing Files)
         shell: bash
         run: |
           set -euxo pipefail
           cd kernel
-          
-          echo "::notice::Patching camera_adaptive_mipi copy rule"
           find techpack/camera -type f -name Makefile -exec sed -i 's/cp $(CAMERA_KERNEL_PATH)\/$(camera_adaptive_mipi_source) $(camera_adaptive_mipi)/[ -n "$(camera_adaptive_mipi)" ] \&\& cp $(CAMERA_KERNEL_PATH)\/$(camera_adaptive_mipi_source) $(camera_adaptive_mipi) || true/g' {} +
           find techpack/camera -type f -name Makefile -exec sed -i 's/cp $(camera_adaptive_mipi_source) $(camera_adaptive_mipi)/[ -n "$(camera_adaptive_mipi)" ] \&\& cp $(camera_adaptive_mipi_source) $(camera_adaptive_mipi) || true/g' {} +
-          
-          echo "::notice::Patching perflog.h copy rule"
           find techpack/camera drivers fs -type f -name Makefile -exec sed -i 's#cp \(.*system/.*/perflog\.h\)#test -f \1 \&\& cp \1 \|\| true#g' {} +
 
       - name: Materialize SUSFS kernel-side patchset
@@ -811,8 +765,6 @@ MKEOF
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/05-susfs-materialize.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
           rm -rf ../susfs4ksu
@@ -821,8 +773,7 @@ MKEOF
           cp -fv ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
 
           SUSFS_KERNEL_PATCH="$(find ../susfs4ksu/kernel_patches -maxdepth 1 -type f -name '50_add_susfs_in_kernel-*.patch' | sort | grep '5.4' | head -n1)"
-          test -n "${SUSFS_KERNEL_PATCH}"
-
+          
           auto_fix_fd_proc_reject() {
             local rej="fs/proc/fd.c.rej"
             local target="fs/proc/fd.c"
@@ -842,8 +793,6 @@ MKEOF
           \tsusfs_fd_link(path, \&inode, \&mnt, \&dentry);\
           #endif
                 }' "$target"
-              else
-                return 1
               fi
             fi
             if ! grep -q '#include <linux/susfs.h>' "$target"; then
@@ -857,34 +806,23 @@ MKEOF
             git apply --unsafe-paths "$SUSFS_KERNEL_PATCH"
           else
             set +e
-            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH" 2>&1 | tee -a "$LOG"
-            PATCH_RC=${PIPESTATUS[0]}
+            patch --batch --forward --no-backup-if-mismatch -p1 --fuzz=2 < "$SUSFS_KERNEL_PATCH"
             set -e
             auto_fix_fd_proc_reject || true
-
-            REJ_COUNT="$(find . -name '*.rej' | wc -l | tr -d ' ')"
-            if [ "$REJ_COUNT" != "0" ]; then
-              echo "::warning::${REJ_COUNT} .rej file(s) remain. Force-wiping to proceed safely."
-              find . -name '*.rej' -delete
-            fi
+            find . -name '*.rej' -delete
           fi
 
           grep -q '<linux/stat.h>' include/linux/susfs.h || sed -i '/#include <linux\/susfs_def.h>/a #include <linux/stat.h>' include/linux/susfs.h
-          test -f include/linux/susfs.h
-          test -f fs/susfs.c
           
           grep -q 'susfs\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
           if [ -f "fs/sus_su.c" ]; then
             grep -q 'sus_su\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS_SUS_SU) += sus_su.o' >> fs/Makefile
           fi
-          echo "::notice::SUSFS Makefile entry verified."
 
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/06-defconfig-patch.log"
-          exec > >(tee -a "${LOG}") 2>&1
           DEFCONFIG="${{ steps.cfg.outputs.defconfig_path }}"
           PROFILE="${{ github.event.inputs.feature_profile }}"
 
@@ -919,23 +857,21 @@ MKEOF
 
           case "$PROFILE" in
             baseline_noroot)
-              echo "::warning::Profile baseline_noroot selected. KernelSU and SUSFS remain disabled."
+              echo "::warning::Profile baseline_noroot selected."
               ;;
             ksu_nosusfs)
-              echo "::warning::Profile ksu_nosusfs selected. Enabling manual-hook KernelSU without SUSFS."
               enable_cfg CONFIG_KSU
               enable_cfg CONFIG_KSU_MANUAL_HOOK
-              disable_cfg CONFIG_KSU_MANUAL_SU 
+              disable_cfg CONFIG_KSU_MANUAL_SU
               disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
               disable_cfg CONFIG_KSU_NONE_HOOK
               disable_cfg CONFIG_KPROBES
               ;;
             full)
-              echo "::warning::Profile full selected. Enabling manual-hook KernelSU with SUSFS."
               enable_cfg CONFIG_KSU
               enable_cfg CONFIG_KSU_MANUAL_HOOK
               enable_cfg CONFIG_KSU_SUSFS
-              disable_cfg CONFIG_KSU_MANUAL_SU 
+              disable_cfg CONFIG_KSU_MANUAL_SU
               disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
               disable_cfg CONFIG_KSU_NONE_HOOK
               disable_cfg CONFIG_KPROBES
@@ -950,7 +886,6 @@ MKEOF
           disable_cfg CONFIG_KSU_DEBUG
 
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
-            echo "::warning::Aggressive mode: Strip Samsung security branches"
             for key in \
               CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
               CONFIG_SECURITY_DEFEX_RESTRICT_SYSCALL \
@@ -958,6 +893,8 @@ MKEOF
               CONFIG_SEC_RESTRICT_ROOTING \
               CONFIG_KNOX \
               CONFIG_KNOX_GUARD \
+              CONFIG_SECURITY_PROCA \
+              CONFIG_PROCA \
               CONFIG_RKP \
               CONFIG_RKP_CFP \
               CONFIG_RKP_NS_PROT \
@@ -969,23 +906,13 @@ MKEOF
             do
               disable_cfg "$key"
             done
-            # THE GOD'S TOUCH FIX: Không trảm CONFIG_PROCA và CONFIG_SECURITY_PROCA 
-            # vì tính năng FIVE của Touchscreen Samsung A52s BẮT BUỘC cần nó để load firmware màn hình.
-            echo "::notice::Preserved PROCA for Touchscreen FIVE Verification"
-          else
-            echo "::notice::Minimal mode: Keep ALL stock Samsung security configurations (KNOX, TIMA, DEFEX, etc.)"
           fi
-
-          echo "::group::Defconfig flags ($PROFILE)"
-          grep -E 'CONFIG_KSU|CONFIG_KPM|CONFIG_KPROBES|KALLSYMS|DEFEX|PROCA|RKP|TIMA|KNOX|ROOTING|TOUCHSCREEN' "$DEFCONFIG" || true
-          echo "::endgroup::"
 
       - name: Build kernel
         id: build
         shell: bash
         run: |
           set -euxo pipefail
-          
           cd kernel
 
           cat > "${GITHUB_WORKSPACE}/build-kernel.sh" <<'EOF'
@@ -1007,8 +934,7 @@ MKEOF
           export KBUILD_BUILD_USER="samsung"
           export KBUILD_BUILD_HOST="localbuild"
 
-          STOCK_LV="$(grep '^CONFIG_LOCALVERSION=' "arch/arm64/configs/vendor/${DEFCONFIG}" \
-            | cut -d= -f2 | tr -d '"' || true)"
+          STOCK_LV="$(grep '^CONFIG_LOCALVERSION=' "arch/arm64/configs/vendor/${DEFCONFIG}" | cut -d= -f2 | tr -d '"' || true)"
           export LOCALVERSION="${STOCK_LV:-}"
 
           export CROSS_COMPILE="aarch64-linux-gnu-"
@@ -1048,22 +974,17 @@ MKEOF
               KCFLAGS="-Wno-error -Wno-strict-prototypes -Wno-implicit-function-declaration -Wno-unused-function -Wno-misleading-indentation"
             )
 
-            echo "::group::Make Defconfig [${tag}]"
             set +e
             make "${COMMON_ARGS[@]}" "vendor/${DEFCONFIG}" 2>&1 | tee "${GITHUB_WORKSPACE}/08-build-${tag}-defconfig.log"
-            local BUILD_RC
-            BUILD_RC="${PIPESTATUS[0]}"
+            local BUILD_RC=${PIPESTATUS[0]}
             set -e
-            echo "::endgroup::"
             
             [ "${BUILD_RC}" -eq 0 ] || return "${BUILD_RC}"
 
-            echo "::group::Make Kernel [${tag}]"
             set +e
             make "${COMMON_ARGS[@]}" -j"$(nproc --all)" 2>&1 | tee "${GITHUB_WORKSPACE}/09-build-${tag}.log"
-            BUILD_RC="${PIPESTATUS[0]}"
+            BUILD_RC=${PIPESTATUS[0]}
             set -e
-            echo "::endgroup::"
             
             return "${BUILD_RC}"
           }
@@ -1073,26 +994,12 @@ MKEOF
           elif build_once "aosp-clang-11-ias0" "ccache ${TC_DIR}/clang-primary/bin/clang" "${TC_DIR}/clang-primary/bin/ld.lld" "0"; then
             echo "toolchain=aosp-clang-11-ias0" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::All toolchain attempts failed! Scroll up and expand the 'Make Defconfig' or 'Make Kernel' groups above to see the REAL error."
             exit 1
           fi
 
           if [ ! -s "${OUT_DIR}/arch/arm64/boot/Image" ]; then
-            echo "::error::Kernel Image was not generated or is empty!"
             exit 1
           fi
-
-          IMAGE_SIZE=$(stat -c%s "${OUT_DIR}/arch/arm64/boot/Image")
-          if [ "$IMAGE_SIZE" -lt 10000000 ]; then
-            echo "::error::Kernel Image is suspiciously small ($IMAGE_SIZE bytes)!"
-            exit 1
-          fi
-          echo "::notice::Kernel Image built successfully ($IMAGE_SIZE bytes)."
-
-          # TÁC VỤ ÉP CÂN MODULES: Nén file driver .ko để ZIP siêu nhẹ, nhưng vẫn giữ driver cảm ứng!
-          echo "::notice::Stripping debug symbols from kernel modules to reduce size..."
-          find "${OUT_DIR}" -name "*.ko" -exec "${LLVM_PREFIX}llvm-strip" --strip-debug {} \;
-
           EOF
 
           chmod +x "${GITHUB_WORKSPACE}/build-kernel.sh"
@@ -1107,8 +1014,6 @@ MKEOF
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/09b-source-pack.log"
-          exec > >(tee -a "${LOG}") 2>&1
           cd kernel
           TAR_NAME="patched-kernel-source-${{ github.event.inputs.region }}-$(date +%Y%m%d-%H%M).tar.zst"
           tar --exclude='.git' -I 'zstd -19 -T0' -cf "${GITHUB_WORKSPACE}/${TAR_NAME}" .
@@ -1120,9 +1025,6 @@ MKEOF
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/10-pack.log"
-          exec > >(tee -a "${LOG}") 2>&1
-          
           git clone --depth=1 --filter=blob:none "$ANYKERNEL_REPO" AnyKernel3
           cd AnyKernel3
 
@@ -1138,23 +1040,16 @@ MKEOF
 
           if [ -f "${DTB_DIR}/${DTB_FILE}" ]; then
             cp -v "${DTB_DIR}/${DTB_FILE}" ./dtb
-            echo "::notice::Copied main DTB: ${DTB_FILE}"
           else
             DTB_COUNT=$(find "${DTB_DIR}" -name "sm7325-a52sxq*.dtb" 2>/dev/null | wc -l || echo 0)
             if [ "$DTB_COUNT" -eq 1 ]; then
               cp -v "${DTB_DIR}"/sm7325-a52sxq*.dtb ./dtb
-              echo "::warning::Using fallback DTB file."
-            else
-              echo "::warning::Could not locate a unique DTB file. DTB will not be included."
             fi
           fi
 
           DTBO_FILE="${{ steps.cfg.outputs.out_dir }}/arch/arm64/boot/dtbo.img"
           if [ -f "${DTBO_FILE}" ]; then
             cp -v "${DTBO_FILE}" ./dtbo.img
-            echo "::notice::Copied DTBO image."
-          else
-            echo "::warning::No dtbo.img found, it might be bundled in dtb."
           fi
 
           cat > anykernel.sh <<'EOF'
@@ -1194,17 +1089,6 @@ MKEOF
 
           cd ..
           
-          # HỒI SINH MODULE ĐÃ ĐƯỢC ÉP CÂN!
-          # Đảm bảo driver Cảm ứng (sec_ts.ko) chuẩn ABI được copy vào ZIP.
-          MODULE_COUNT=$(find "${{ steps.cfg.outputs.out_dir }}" -name "*.ko" | wc -l)
-          if [ "$MODULE_COUNT" -gt 0 ]; then
-            echo "::notice::Found ${MODULE_COUNT} stripped kernel modules. Enabling module flashing."
-            sed -i 's/do.modules=0/do.modules=1/' AnyKernel3/anykernel.sh
-            # Samsung A52s đọc module từ vendor. Ta đóng gói đúng vào thư mục này để AK3 làm phép.
-            mkdir -p AnyKernel3/modules/vendor/lib/modules
-            find "${{ steps.cfg.outputs.out_dir }}" -name "*.ko" -exec cp {} AnyKernel3/modules/vendor/lib/modules/ \;
-          fi
-
           ZIP_NAME="${{ github.event.inputs.kernel_name }}-${{ github.event.inputs.region }}-${{ steps.build.outputs.toolchain }}-$(date +%Y%m%d-%H%M).zip"
           (
             cd AnyKernel3
@@ -1217,23 +1101,6 @@ MKEOF
         shell: bash
         run: |
           set +e
-          echo "::group::compile-errors"
-          LOG_COUNT=$(ls "${GITHUB_WORKSPACE}"/*.log 2>/dev/null | wc -l)
-          if [ "$LOG_COUNT" -eq 0 ]; then
-            echo ">>> ❌ KHÔNG TÌM THẤY LOG BIÊN DỊCH NÀO!"
-            echo ">>> Cảnh báo: Lỗi đã xảy ra TRƯỚC KHI quá trình Build Kernel bắt đầu."
-            echo ">>> (Ví dụ: Tải Toolchain thất bại, Clone Kernel lỗi, Patch thất bại...)."
-            echo ">>> Hãy mở rộng các bước bị đánh dấu ❌ (màu đỏ) ở trên trong giao diện Github Actions để xem chi tiết."
-          else
-            for f in "${GITHUB_WORKSPACE}"/*.log; do
-              [ -f "$f" ] || continue
-              echo ">>> Inspecting log file: $(basename "$f")"
-              tail -n 100 "$f"
-              echo "----------------------------------------"
-            done
-          fi
-          echo "::endgroup::"
-          
           {
             echo "## Compile Error Report"
             echo '```text'
