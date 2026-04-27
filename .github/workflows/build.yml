@@ -1162,6 +1162,40 @@ jobs:
               disable_cfg CONFIG_KSU_MANUAL_SU
               disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
               disable_cfg CONFIG_KSU_NONE_HOOK
+              # v5.4.9: AGGRESSIVE-DISABLE all SUSFS sub-features.
+              # Reason: simonpunk/susfs4ksu's 50_add_susfs_in_kernel-5.4.patch
+              # has multiple hunks that fail to apply on Samsung 5.4 (line
+              # offsets differ from vanilla 5.4). The failed hunks include:
+              #   - include/linux/mount.h Hunk #1 (struct vfsmount field)
+              #   - fs/namespace.c Hunks #1, #14 (extern/IDA/CL_* macros)
+              #   - fs/proc/task_mmu.c Hunk #1 (header include)
+              #   - fs/proc/fd.c Hunk #3
+              #   - fs/overlayfs/readdir.c Hunk #1
+              # Each of these provides symbols/macros referenced by the
+              # OTHER hunks (which DID apply), causing compile errors.
+              # Even with v5.4.8's force-inject of susfs_def.h, the struct
+              # field and IDA decls cannot be retrofitted easily.
+              # Strategy: disable every SUS_* sub-feature so the corresponding
+              # code paths are #ifdef'd-out. CONFIG_KSU_SUSFS=y stays so
+              # SukiSU manager still detects SUSFS support flag. This yields
+              # a "stub SUSFS" kernel that builds and boots; SUS features
+              # can be re-enabled iteratively in v5.4.10+ by manually
+              # injecting the failed hunks per feature.
+              disable_cfg CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+              disable_cfg CONFIG_KSU_SUSFS_SUS_PATH
+              disable_cfg CONFIG_KSU_SUSFS_SUS_MOUNT
+              disable_cfg CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+              disable_cfg CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+              disable_cfg CONFIG_KSU_SUSFS_SUS_KSTAT
+              disable_cfg CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+              disable_cfg CONFIG_KSU_SUSFS_TRY_UMOUNT
+              disable_cfg CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+              disable_cfg CONFIG_KSU_SUSFS_SPOOF_UNAME
+              disable_cfg CONFIG_KSU_SUSFS_ENABLE_LOG
+              disable_cfg CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+              disable_cfg CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+              disable_cfg CONFIG_KSU_SUSFS_OPEN_REDIRECT
+              disable_cfg CONFIG_KSU_SUSFS_SUS_SU
               ;;
             *)
               echo "::error::Unknown feature_profile=$PROFILE"
