@@ -203,7 +203,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v541" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v542" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -874,6 +874,9 @@ jobs:
             printf '%s=m\n' "$key" >> "$DEFCONFIG"
           }
 
+          # v5.4.2: do NOT touch CONFIG_KPROBES — SukiSU Kconfig has
+          # `depends on KPROBES`, so disabling it would silently drop
+          # CONFIG_KSU from .config (root cause of v5.4.1 verify failure).
           for key in \
             CONFIG_KSU \
             CONFIG_KSU_MANUAL_HOOK \
@@ -883,13 +886,13 @@ jobs:
             CONFIG_KSU_NONE_HOOK \
             CONFIG_KSU_DEBUG \
             CONFIG_KPM \
-            CONFIG_KALLSYMS_ALL \
-            CONFIG_KPROBES
+            CONFIG_KALLSYMS_ALL
           do
             disable_cfg "$key"
           done
 
           enable_cfg CONFIG_KALLSYMS
+          enable_cfg CONFIG_KPROBES
 
           # v5.4 NOTE: CNSS family is left as BUILT-IN (=y) — switching to =m
           # would break CNSS2_QMI=y (bool depends on tristate). Instead, the
@@ -908,7 +911,6 @@ jobs:
               disable_cfg CONFIG_KSU_MANUAL_SU
               disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
               disable_cfg CONFIG_KSU_NONE_HOOK
-              disable_cfg CONFIG_KPROBES
               ;;
             full)
               enable_cfg CONFIG_KSU
@@ -917,7 +919,6 @@ jobs:
               disable_cfg CONFIG_KSU_MANUAL_SU
               disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
               disable_cfg CONFIG_KSU_NONE_HOOK
-              disable_cfg CONFIG_KPROBES
               ;;
             *)
               echo "::error::Unknown feature_profile=$PROFILE"
@@ -1084,11 +1085,11 @@ jobs:
             grep -E 'CONFIG_KSU' "${KCONFIG}" || true
             exit 1
           fi
-          if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "${KCONFIG}"; then
-            echo "::error::CONFIG_KSU_MANUAL_HOOK is NOT =y in built .config — kernel will report Hook Type: Unknown"
-            grep -E 'CONFIG_KSU' "${KCONFIG}" || true
-            exit 1
-          fi
+          # NOTE (v5.4.2): SukiSU-Ultra Kconfig does NOT define
+          # KSU_MANUAL_HOOK as a symbol (only KSU, KSU_DEBUG, KSU_MANUAL_SU,
+          # etc.). Manual-hook call sites in patched source are guarded by
+          # `#ifdef CONFIG_KSU`, so they activate as long as CONFIG_KSU=y.
+          # We therefore do NOT enforce CONFIG_KSU_MANUAL_HOOK=y here.
           if [ "${{ github.event.inputs.feature_profile }}" = "full" ]; then
             grep -q '^CONFIG_KSU_SUSFS=y' "${KCONFIG}" || {
               echo "::error::profile=full but CONFIG_KSU_SUSFS not =y"
