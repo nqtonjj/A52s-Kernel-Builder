@@ -203,7 +203,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v543" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v544" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -472,26 +472,60 @@ jobs:
           # inline helpers task_pgrp/task_session resolve.
           while IFS= read -r f; do
             [ -f "$f" ] || continue
-            # Strip any previously-injected dummy block (idempotent).
             python3 - "$f" <<'PY'
           import re, sys
           from pathlib import Path
           p = Path(sys.argv[1])
           s = p.read_text()
-          new = re.sub(
+          orig = s
+          # 1) Strip any previously-injected dummy macro block (idempotent).
+          s = re.sub(
               r'\s*/\* KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS \*/.*?#endif\s*\n',
               '\n', s, count=1, flags=re.DOTALL)
-          if new != s:
-              p.write_text(new)
+          # 2) Force-inject the sched headers right after the LAST top-level
+          #    #include line so tasklist_lock / init_task / task_pgrp /
+          #    task_session / change_pid all resolve via real Samsung 5.4
+          #    kernel headers.
+          needed = (
+              '#include <linux/sched.h>\n'
+              '#include <linux/sched/signal.h>\n'
+              '#include <linux/sched/task.h>\n'
+              '#include <linux/init_task.h>\n'
+              '#include <linux/pid.h>\n'
+          )
+          for hdr in ('linux/sched/signal.h', 'linux/sched/task.h',
+                      'linux/init_task.h', 'linux/pid.h'):
+              if hdr not in s:
+                  break
+          else:
+              hdr = None
+          if hdr is not None:
+              # Find last top-level #include in the contiguous header block.
+              # Stop at the first #ifdef / #if / #ifndef / static / int /
+              # void / function definition so we don't land inside a
+              # conditional include block (e.g. #ifdef CONFIG_KPM).
+              lines = s.splitlines(keepends=True)
+              insert_idx = 0
+              for i, line in enumerate(lines):
+                  ls = line.lstrip()
+                  if ls.startswith('#include'):
+                      insert_idx = i + 1
+                      continue
+                  if ls.startswith('#if') or ls.startswith('#ifdef') \
+                     or ls.startswith('#ifndef') or ls.startswith('#define') \
+                     or ls.startswith('#error') or ls.startswith('#pragma'):
+                      break
+                  if ls and not ls.startswith('//') and not ls.startswith('/*') \
+                     and not ls.startswith('*'):
+                      if insert_idx > 0:
+                          break
+              if insert_idx == 0:
+                  insert_idx = 0
+              lines.insert(insert_idx, needed)
+              s = ''.join(lines)
+          if s != orig:
+              p.write_text(s)
           PY
-            # Ensure required sched headers are present.
-            if ! grep -q '<linux/sched/signal\.h>' "$f"; then
-              sed -i '/^#include <linux\/types\.h>/a #include <linux/sched/signal.h>' "$f" \
-                || sed -i '1i #include <linux/sched/signal.h>' "$f"
-            fi
-            if ! grep -q '<linux/sched/task\.h>' "$f"; then
-              sed -i '/^#include <linux\/sched\/signal\.h>/a #include <linux/sched/task.h>' "$f"
-            fi
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
 
           echo "::notice::Stubbing optional manager/policy files"
