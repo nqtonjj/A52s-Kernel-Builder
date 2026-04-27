@@ -203,7 +203,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v52" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v53" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -1137,24 +1137,57 @@ jobs:
           mkdir -p extracted
           if [ "${EROFS_MAGIC}" = "e2e1f5e0" ] || echo "${FS_TYPE_HINT}" | grep -q 'erofs'; then
             FORMAT=erofs
-            # Try extractors in order of preference. Ubuntu's erofs-utils
-            # ships fsck.erofs and dump.erofs; extract.erofs is AOSP-only.
             EXTRACT_DEST="extracted/vendor"
             mkdir -p "${EXTRACT_DEST}"
-            if command -v fsck.erofs >/dev/null 2>&1 && fsck.erofs --help 2>&1 | grep -q -- '--extract'; then
-              echo "Using fsck.erofs --extract"
-              fsck.erofs --extract="${EXTRACT_DEST}" vendor.raw
-            elif command -v extract.erofs >/dev/null 2>&1; then
-              echo "Using extract.erofs"
+
+            # Strategy A: mount EROFS via loopback (kernel module) — most
+            # reliable on Ubuntu 22.04 GA runners (kernel 5.15+ has
+            # CONFIG_EROFS_FS=m). Doesn't depend on erofs-utils version.
+            EXTRACTED=0
+            if sudo modprobe erofs 2>/dev/null && grep -qw erofs /proc/filesystems; then
+              echo "Strategy A: mount -t erofs -o loop,ro"
+              mkdir -p mnt_erofs
+              if sudo mount -t erofs -o loop,ro vendor.raw mnt_erofs; then
+                sudo cp -a mnt_erofs/. "${EXTRACT_DEST}/"
+                sudo umount mnt_erofs
+                sudo chown -R "$(id -u):$(id -g)" "${EXTRACT_DEST}" || true
+                EXTRACTED=1
+              else
+                echo "::warning::EROFS mount failed, trying next strategy"
+              fi
+            fi
+
+            # Strategy B: fsck.erofs --extract=PATH (newer erofs-utils 1.5+)
+            if [ "${EXTRACTED}" = 0 ] && command -v fsck.erofs >/dev/null 2>&1; then
+              if fsck.erofs --extract="${EXTRACT_DEST}" vendor.raw 2>/dev/null; then
+                echo "Strategy B: fsck.erofs --extract=PATH"
+                EXTRACTED=1
+              fi
+            fi
+
+            # Strategy C: extract.erofs (AOSP standalone tool)
+            if [ "${EXTRACTED}" = 0 ] && command -v extract.erofs >/dev/null 2>&1; then
+              echo "Strategy C: extract.erofs (AOSP)"
               extract.erofs -i vendor.raw -x -o extracted >/dev/null
               EXTRACT_DEST="$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)"
-            else
-              echo "Falling back to kernel EROFS mount"
-              mkdir -p mnt_erofs
-              sudo mount -t erofs -o loop,ro vendor.raw mnt_erofs
-              sudo cp -a mnt_erofs/. "${EXTRACT_DEST}/"
-              sudo umount mnt_erofs
-              sudo chown -R "$(id -u):$(id -g)" "${EXTRACT_DEST}" || true
+              EXTRACTED=1
+            fi
+
+            # Strategy D: build erofs-utils from source as last resort
+            if [ "${EXTRACTED}" = 0 ]; then
+              echo "Strategy D: build erofs-utils from source"
+              sudo apt-get install -y -qq autoconf automake libtool pkg-config \
+                liblz4-dev libfuse-dev uuid-dev libselinux1-dev || true
+              git clone --depth=1 https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git /tmp/erofs-utils-src
+              ( cd /tmp/erofs-utils-src && ./autogen.sh && ./configure --enable-fuse && make -j"$(nproc)" && sudo make install )
+              hash -r
+              fsck.erofs --extract="${EXTRACT_DEST}" vendor.raw
+              EXTRACTED=1
+            fi
+
+            if [ "${EXTRACTED}" = 0 ] || [ -z "$(ls -A "${EXTRACT_DEST}" 2>/dev/null)" ]; then
+              echo "::error::All EROFS extraction strategies failed"
+              exit 1
             fi
             ROOT_DIR="${EXTRACT_DEST}"
           elif [ "${EXT4_MAGIC_LE}" = "53ef" ] || echo "${FS_TYPE_HINT}" | grep -qE 'ext[234]'; then
