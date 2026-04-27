@@ -540,9 +540,44 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          # v5.4.5: DO NOT stub policy/app_profile.c, selinux/rules.c, selinux/sepolicy.c.
-          # The real source provides escape_with_root_profile, escape_to_root_for_init,
-          # apply_kernelsu_rules, handle_sepolicy required by kernelsu link.
+          # v5.4.6: STUB policy/app_profile.c, selinux/rules.c, selinux/sepolicy.c
+          # because real source uses Samsung 5.4-incompatible APIs:
+          #  - app_profile.c -> current->seccomp.filter_count (atomic_t added in 5.11)
+          #  - rules.c       -> selinux_state.policy / .policy_mutex (added in 5.10)
+          # Stubs use the REAL function NAMES so linker resolves all references.
+          # Functional root via escape_with_root_profile is no-op for now (kernel
+          # boots, SukiSU manager detects, hooks register; full root may need a
+          # follow-up).
+          while IFS= read -r f; do [ -f "$f" ] || continue
+            cat > "$f" <<'EOF'
+          // SPDX-License-Identifier: GPL-2.0
+          // STUB v5.4.6 - real app_profile.c uses 5.11+ APIs not in Samsung 5.4.
+          #include <linux/types.h>
+          struct root_profile;
+          struct cred;
+          int escape_with_root_profile(void) { return 0; }
+          void escape_to_root_for_init(void) {}
+          void setup_groups(struct root_profile *profile, struct cred *cred) { (void)profile; (void)cred; }
+          EOF
+          done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
+
+          while IFS= read -r f; do [ -f "$f" ] || continue
+            cat > "$f" <<'EOF'
+          // SPDX-License-Identifier: GPL-2.0
+          // STUB v5.4.6 - real rules.c uses selinux_state.policy not in Samsung 5.4.
+          #include <linux/types.h>
+          #include <linux/errno.h>
+          void apply_kernelsu_rules(void) {}
+          int handle_sepolicy(void __user *user_data, u64 data_len) { (void)user_data; (void)data_len; return -EOPNOTSUPP; }
+          EOF
+          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
+
+          while IFS= read -r f; do [ -f "$f" ] || continue
+            cat > "$f" <<'EOF'
+          // SPDX-License-Identifier: GPL-2.0
+          // STUB v5.4.6 - real sepolicy.c only called from rules.c which is also stubbed.
+          EOF
+          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
 
           echo "::notice::Injecting minmax.h"
           mkdir -p include/linux
@@ -565,12 +600,24 @@ jobs:
           KSU_REAL_DIR="$(readlink -f drivers/kernelsu 2>/dev/null || true)"
           [ -n "${KSU_REAL_DIR}" ] || KSU_REAL_DIR="$(pwd)/KernelSU/kernel"
 
+          # v5.4.6: link-fix MUST go into Kbuild (used by in-tree kernel build).
+          # The Makefile in SukiSU is for external modules (`make M=...`) and is
+          # ignored when KernelSU is symlinked into drivers/kernelsu/.
           cat > "${KSU_REAL_DIR}/ksu_compat_linkfix.c" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
-          __attribute__((weak)) int escape_to_root_for_init(void) { return 0; }
-          __attribute__((weak)) int escape_with_root_profile(void) { return 0; }
-          __attribute__((weak)) int apply_kernelsu_rules(void) { return 0; }
-          __attribute__((weak)) int handle_sepolicy(void) { return 0; }
+          // v5.4.6 link-fix: weak stubs for symbols missing in Samsung 5.4 base kernel.
+          #include <linux/types.h>
+          #include <linux/errno.h>
+          struct path;
+          // path_mount: added in mainline 5.10 (commit 2db154b3ea8e). Samsung 5.4
+          // base does not export it. SukiSU su_mount_ns.c calls it via extern.
+          __attribute__((weak)) int path_mount(const char *dev_name, struct path *path,
+                                                const char *type_page, unsigned long flags,
+                                                void *data_page) {
+              (void)dev_name; (void)path; (void)type_page; (void)flags; (void)data_page;
+              return -ENOSYS;
+          }
+          // Other potentially-missing root-profile helpers (legacy KernelSU API):
           __attribute__((weak)) int update_uid_root_profile(void) { return 0; }
           __attribute__((weak)) int update_gid_root_profile(void) { return 0; }
           __attribute__((weak)) int update_sid_root_profile(void) { return 0; }
@@ -579,10 +626,21 @@ jobs:
           __attribute__((weak)) int update_root_profile(void) { return 0; }
           EOF
 
+          # CRITICAL v5.4.6: register link-fix in Kbuild (not Makefile) so it
+          # actually compiles in-tree. Insert after `kernelsu-objs := core/init.o`.
+          for kb in KernelSU/kernel/Kbuild drivers/kernelsu/Kbuild; do
+            [ -f "$kb" ] || continue
+            grep -q 'ksu_compat_linkfix\.o' "$kb" || \
+              sed -i '0,/^kernelsu-objs := core\/init\.o/{s||kernelsu-objs := core/init.o\nkernelsu-objs += ksu_compat_linkfix.o|}' "$kb"
+          done
+          # Belt-and-suspenders: also keep the Makefile entry harmless.
           for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
             [ -f "$mk" ] || continue
             grep -q 'ksu_compat_linkfix\.o' "$mk" || printf '\nobj-$(CONFIG_KSU) += ksu_compat_linkfix.o\n' >> "$mk"
           done
+
+          echo "::notice::Verifying ksu_compat_linkfix is in Kbuild"
+          grep -n 'ksu_compat_linkfix' KernelSU/kernel/Kbuild || { echo "::error::link-fix NOT in Kbuild"; exit 1; }
 
       - name: SukiSU-Ultra hooking strategy notice (v5.4.5)
         if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
