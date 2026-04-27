@@ -1024,6 +1024,74 @@ jobs:
             grep -q 'sus_su\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS_SUS_SU) += sus_su.o' >> fs/Makefile
           fi
 
+      - name: Force-inject linux/susfs_def.h into all SUSFS users (v5.4.8)
+        if: ${{ github.event.inputs.feature_profile == 'full' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd kernel
+
+          # SUSFS patch puts `#include <linux/susfs_def.h>` behind `#ifdef
+          # CONFIG_KSU_SUSFS_SUS_KSTAT`. When a hunk fails (silently deleted by
+          # `find -name *.rej -delete`), the include is missing while usage of
+          # INODE_STATE_SUS_*/TASK_STRUCT_NON_ROOT_*/susfs_task_state remains
+          # → "use of undeclared identifier" compile error.
+          # Solution: scan every .c/.h that references those symbols and ensure
+          # a hard, unconditional include of <linux/susfs_def.h> at the top.
+          [ -f include/linux/susfs_def.h ] || { echo "::error::susfs_def.h missing from include/linux/"; exit 1; }
+
+          INJECTED=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            if grep -q '^#include <linux/susfs_def.h>$' "$f"; then continue; fi
+            # Insert AFTER the first contiguous block of #include directives at
+            # the top of the file. Use python for robustness.
+            python3 - "$f" <<'PY'
+          import sys, re
+          p = sys.argv[1]
+          with open(p, 'r', errors='ignore') as fh:
+              src = fh.read()
+          inc = '#include <linux/susfs_def.h>\n'
+          # Find first #include line; insert after the last consecutive include.
+          lines = src.split('\n')
+          last_inc = -1
+          for i, line in enumerate(lines):
+              if line.startswith('#include'):
+                  last_inc = i
+              elif last_inc >= 0 and line.strip() == '':
+                  pass  # allow blank lines within include block
+              elif last_inc >= 0:
+                  break
+          if last_inc < 0:
+              # No includes at all: prepend.
+              new_src = inc + src
+          else:
+              lines.insert(last_inc + 1, inc.rstrip('\n'))
+              new_src = '\n'.join(lines)
+          with open(p, 'w') as fh:
+              fh.write(new_src)
+          PY
+            INJECTED=$((INJECTED+1))
+          done < <(grep -rlE '\b(INODE_STATE_SUS_[A-Z]+|TASK_STRUCT_NON_ROOT_USER_APP_PROC|susfs_task_state)\b' fs/ kernel/ drivers/ include/ 2>/dev/null | grep -E '\.(c|h)$' | sort -u)
+
+          echo "::notice::Force-injected susfs_def.h into $INJECTED files"
+
+          # Sanity: every reference is now resolvable
+          REMAINING_FILES=$(grep -rlE '\b(INODE_STATE_SUS_[A-Z]+|TASK_STRUCT_NON_ROOT_USER_APP_PROC|susfs_task_state)\b' fs/ kernel/ drivers/ include/ 2>/dev/null | grep -E '\.(c|h)$' | sort -u)
+          MISSING=0
+          for f in $REMAINING_FILES; do
+            [ -f "$f" ] || continue
+            # susfs_def.h itself defines these macros; skip.
+            case "$f" in
+              */susfs_def.h|*/susfs.h) continue;;
+            esac
+            if ! grep -q '^#include <linux/susfs_def.h>$' "$f" && ! grep -q '^#include "susfs_def.h"' "$f"; then
+              echo "::warning::$f references SUSFS macros but lacks <linux/susfs_def.h>"
+              MISSING=$((MISSING+1))
+            fi
+          done
+          [ "$MISSING" -eq 0 ] || { echo "::error::$MISSING file(s) still missing susfs_def.h"; exit 1; }
+
       - name: Patch A52s defconfig and Samsung security mode
         shell: bash
         run: |
