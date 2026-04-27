@@ -304,16 +304,15 @@ jobs:
             exit 0
           fi
 
-          # SukiSU-Ultra 911b075 doesn't define CONFIG_KSU_SUSFS — its Kconfig
-          # ends after KSU_DISABLE_POLICY. The susfs4ksu upstream patch
-          # (KernelSU/10_enable_susfs_for_ksu.patch) doesn't apply because line
-          # offsets differ. Inject the SUSFS menu block directly.
-          # Strip any pre-existing trailing endmenu (none expected here).
-          sed -i '/^endmenu$/d' "$KCONFIG"
-
-          cat >> "$KCONFIG" <<'EOF'
-
-          menu "KernelSU - SUSFS"
+          # SukiSU-Ultra 911b075 Kconfig structure:
+          #   line 1:  menu "KernelSU"
+          #   ...
+          #   last:    endmenu     <- closes the outer KernelSU menu
+          # We insert our SUSFS configs just BEFORE the trailing endmenu so they
+          # are nested inside the existing KernelSU menu (no nested submenu, no
+          # unbalanced menu/endmenu).
+          BLOCK_FILE=$(mktemp)
+          cat > "$BLOCK_FILE" <<'EOF'
           config KSU_SUSFS
               bool "KernelSU addon - SUSFS"
               depends on KSU
@@ -395,11 +394,22 @@ jobs:
               bool "Enable sus_su (kprobe-based su)"
               depends on KSU_SUSFS
               default y
-          endmenu
           EOF
+
+          # Insert block before the LAST endmenu (the outer KernelSU menu's close).
+          awk -v blockf="$BLOCK_FILE" '
+            BEGIN { while ((getline line < blockf) > 0) block = block line "\n"; close(blockf) }
+            /^endmenu$/ && !done { printf "%s", block; done=1 }
+            { print }
+          ' "$KCONFIG" > "$KCONFIG.new" && mv "$KCONFIG.new" "$KCONFIG"
+          rm -f "$BLOCK_FILE"
 
           echo "::notice::Injected SUSFS Kconfig block"
           grep -c '^config KSU_SUSFS' "$KCONFIG"
+          # Sanity: balanced menu/endmenu
+          MENU_COUNT=$(grep -c '^menu' "$KCONFIG")
+          ENDMENU_COUNT=$(grep -c '^endmenu' "$KCONFIG")
+          [ "$MENU_COUNT" = "$ENDMENU_COUNT" ] || { echo "::error::Kconfig menu/endmenu unbalanced: $MENU_COUNT vs $ENDMENU_COUNT"; exit 1; }
 
       - name: Verify SukiSU version supports SUSFS
         if: ${{ github.event.inputs.feature_profile == 'full' }}
