@@ -203,7 +203,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v53" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v54" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -606,22 +606,31 @@ jobs:
           echo "::notice::Applying manual hook patches to fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, drivers/input/input.c, fs/devpts/inode.c, and fs/namespace.c"
 
           python3 - <<'EOF'
-          import os
+          import os, sys
           from pathlib import Path
+
+          MISSING = []
 
           def patch_file(filepath, replacements):
               p = Path(filepath)
-              if not p.exists(): return
+              if not p.exists():
+                  MISSING.append(f"FILE_MISSING:{filepath}")
+                  return
               s = p.read_text()
               original = s
               for old, new in replacements:
-                  if old in s and '#ifdef CONFIG_KSU' not in new:
-                      s = s.replace(old, new)
-                  elif old in s and '#ifdef CONFIG_KSU' in new and '#ifdef CONFIG_KSU' not in s[max(0, s.find(old)-60):s.find(old)]:
-                      s = s.replace(old, new)
+                  # Idempotency: skip only if the EXACT new content already present.
+                  if new in s:
+                      continue
+                  if old not in s:
+                      MISSING.append(f"PATTERN_NOT_FOUND:{filepath}::{old[:70]!r}")
+                      continue
+                  s = s.replace(old, new, 1)
               if s != original:
                   p.write_text(s)
                   print(f"Patched {filepath}")
+              else:
+                  print(f"No changes applied to {filepath} (already patched or pattern missing)")
 
           patch_file('fs/exec.c', [
               ('static int do_execveat_common(int fd, struct filename *filename,', 
@@ -710,7 +719,27 @@ jobs:
                   s_ns += "\n" + umount_code
                   p_ns.write_text(s_ns)
                   print("Patched fs/namespace.c with path_umount backport")
+
+          if MISSING:
+              print("::error::SukiSU manual-hook patching FAILED. The following replacements did not apply:", file=sys.stderr)
+              for m in MISSING:
+                  print("  -", m, file=sys.stderr)
+              sys.exit(1)
           EOF
+
+          echo "::notice::Verify hook calls were actually injected (post-patch grep)"
+          MISSING_HOOKS=()
+          grep -q 'ksu_handle_execveat'           fs/exec.c            || MISSING_HOOKS+=("fs/exec.c::ksu_handle_execveat")
+          grep -q 'ksu_handle_faccessat'          fs/open.c            || MISSING_HOOKS+=("fs/open.c::ksu_handle_faccessat")
+          grep -q 'ksu_handle_vfs_read'           fs/read_write.c      || MISSING_HOOKS+=("fs/read_write.c::ksu_handle_vfs_read")
+          grep -q 'ksu_handle_stat'               fs/stat.c            || MISSING_HOOKS+=("fs/stat.c::ksu_handle_stat")
+          grep -q 'ksu_handle_input_handle_event' drivers/input/input.c || MISSING_HOOKS+=("drivers/input/input.c::ksu_handle_input_handle_event")
+          if [ "${#MISSING_HOOKS[@]}" -gt 0 ]; then
+              echo "::error::Manual-hook call sites NOT injected into source files: ${MISSING_HOOKS[*]}"
+              echo "::error::This is the v5.3 silent-fail bug — hook extern declarations may have been added but ksu_handle_*() calls were not. Build would produce a kernel that reports Hook Type: Unknown."
+              exit 1
+          fi
+          echo "::notice::All manual-hook call sites verified injected."
 
           echo "::notice::Exporting sys_call_table for non-GKI SukiSU"
           if grep -q "sys_call_table" arch/arm64/kernel/sys.c && ! grep -q "EXPORT_SYMBOL.*sys_call_table" arch/arm64/kernel/sys.c; then
@@ -841,6 +870,12 @@ jobs:
             printf '%s=y\n' "$key" >> "$DEFCONFIG"
           }
 
+          modulize_cfg() {
+            local key="$1"
+            sed -i "/^${key}=y$/d;/^${key}=m$/d;/^# ${key} is not set$/d" "$DEFCONFIG"
+            printf '%s=m\n' "$key" >> "$DEFCONFIG"
+          }
+
           for key in \
             CONFIG_KSU \
             CONFIG_KSU_MANUAL_HOOK \
@@ -857,6 +892,13 @@ jobs:
           done
 
           enable_cfg CONFIG_KALLSYMS
+
+          # v5.4 NOTE: CNSS family is left as BUILT-IN (=y) — switching to =m
+          # would break CNSS2_QMI=y (bool depends on tristate). Instead, the
+          # vendor-repack step below DELETES the stock cnss/icnss .ko files
+          # (which have OLD kernel CRCs and would otherwise cascade-fail
+          # qca_cld3_wlan via modules.dep). The kernel's built-in CNSS code
+          # provides the same symbols with NEW CRCs.
 
           case "$PROFILE" in
             baseline_noroot)
@@ -1023,6 +1065,61 @@ jobs:
           export DEFCONFIG="${{ steps.cfg.outputs.defconfig }}"
           export OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
           bash "${GITHUB_WORKSPACE}/build-kernel.sh"
+
+      - name: Verify built kernel has SukiSU integration (v5.4)
+        if: ${{ success() && github.event.inputs.feature_profile != 'baseline_noroot' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
+          KCONFIG="${OUT_DIR}/.config"
+          VMLINUX="${OUT_DIR}/vmlinux"
+          IMAGE="${OUT_DIR}/arch/arm64/boot/Image"
+
+          echo "::group::Verify CONFIG_KSU_MANUAL_HOOK in built .config"
+          if [ ! -f "${KCONFIG}" ]; then
+            echo "::error::Built .config missing at ${KCONFIG}"
+            exit 1
+          fi
+          if ! grep -q '^CONFIG_KSU=y' "${KCONFIG}"; then
+            echo "::error::CONFIG_KSU is NOT =y in built .config (Kconfig may have disabled it due to unmet deps)"
+            grep -E 'CONFIG_KSU' "${KCONFIG}" || true
+            exit 1
+          fi
+          if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "${KCONFIG}"; then
+            echo "::error::CONFIG_KSU_MANUAL_HOOK is NOT =y in built .config — kernel will report Hook Type: Unknown"
+            grep -E 'CONFIG_KSU' "${KCONFIG}" || true
+            exit 1
+          fi
+          if [ "${{ github.event.inputs.feature_profile }}" = "full" ]; then
+            grep -q '^CONFIG_KSU_SUSFS=y' "${KCONFIG}" || {
+              echo "::error::profile=full but CONFIG_KSU_SUSFS not =y"
+              exit 1
+            }
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Verify ksu_handle_* symbols are in vmlinux"
+          STRINGS="$(command -v llvm-strings || true)"
+          if [ -z "${STRINGS}" ]; then
+            STRINGS="${TC_DIR}/clang-primary/bin/llvm-strings"
+          fi
+          if [ ! -x "${STRINGS}" ]; then
+            STRINGS=strings
+          fi
+          MISSING_SYMS=()
+          for sym in ksu_handle_execveat ksu_handle_faccessat ksu_handle_vfs_read ksu_handle_stat ksu_handle_input_handle_event ksu_handle_prctl; do
+            if ! "${STRINGS}" "${VMLINUX}" 2>/dev/null | grep -q "${sym}"; then
+              MISSING_SYMS+=("${sym}")
+            fi
+          done
+          if [ "${#MISSING_SYMS[@]}" -gt 0 ]; then
+            echo "::error::vmlinux is missing SukiSU manual-hook symbols: ${MISSING_SYMS[*]}"
+            echo "::error::This means manual-hook patches did NOT actually integrate. Kernel would report Hook Type: Unknown."
+            exit 1
+          fi
+          echo "::notice::All SukiSU hook symbols present in vmlinux."
+          echo "::endgroup::"
 
       - name: Pack patched source tarball
         if: ${{ success() && (github.event.inputs.upload_patched_source == 'true' || github.event.inputs.upload_patched_source == true) }}
@@ -1255,6 +1352,73 @@ jobs:
             sudo umount mnt_vendor 2>/dev/null || true
             exit 1
           fi
+
+          # v5.4 fix: DELETE stock cnss2/cnss_utils/cnss_nl/cnss_prealloc/icnss2 .ko
+          # files. They have STOCK kernel CRCs and would fail to load against the
+          # new SukiSU kernel. CNSS code is built-in (CONFIG_CNSS2=y etc.), so
+          # the kernel exports those symbols with NEW CRCs natively — qca_cld3_wlan
+          # will resolve against the built-in version.
+          # Also strip CNSS entries from modules.dep / modules.load / modules.alias
+          # so init does not try to modprobe them and cascade-fail qca_cld3_wlan.
+          CNSS_STALE=(cnss2 cnss_utils cnss_nl cnss_prealloc wcnss_prealloc icnss2)
+          for base in "${CNSS_STALE[@]}"; do
+            for path in "${MOD_DIR}/${base}.ko" "${GKI_SUBDIR:+${GKI_SUBDIR}/${base}.ko}"; do
+              [ -z "${path}" ] && continue
+              if sudo test -f "${path}"; then
+                echo "Removing stock stale module: ${path}"
+                sudo rm -f "${path}"
+              fi
+            done
+          done
+
+          # Strip cnss/icnss references from module metadata so init does not try
+          # to modprobe them. Treat modules.dep specially (LHS=delete, RHS=strip).
+          CNSS_RE='cnss2|cnss_utils|cnss_nl|cnss_prealloc|wcnss_prealloc|icnss2'
+          for d in "${MOD_DIR}" "${GKI_SUBDIR}"; do
+            [ -z "${d}" ] && continue
+
+            # modules.load — one path per line; delete cnss lines.
+            if [ -f "${d}/modules.load" ]; then
+              sudo sed -i -E "/\\/(${CNSS_RE})\\.ko\$/d" "${d}/modules.load"
+            fi
+
+            # modules.dep — "lhs.ko: rhs1.ko rhs2.ko ...". Delete lines whose LHS
+            # is a cnss module; strip cnss tokens from RHS of remaining lines.
+            if [ -f "${d}/modules.dep" ]; then
+              sudo awk -v RE="(${CNSS_RE})" '
+                {
+                  # split into lhs and rhs
+                  pos = index($0, ":")
+                  if (pos == 0) { print; next }
+                  lhs = substr($0, 1, pos-1)
+                  rhs = substr($0, pos+1)
+                  # if lhs ends with /<cnss_name>.ko -> drop entire line
+                  if (match(lhs, "/(" RE ")\\.ko$")) next
+                  # strip cnss tokens from rhs (space-separated)
+                  n = split(rhs, toks, /[[:space:]]+/)
+                  out = ""
+                  for (i = 1; i <= n; i++) {
+                    if (toks[i] == "") continue
+                    if (match(toks[i], "/(" RE ")\\.ko$")) continue
+                    out = out " " toks[i]
+                  }
+                  print lhs ":" out
+                }
+              ' "${d}/modules.dep" | sudo tee "${d}/modules.dep.new" >/dev/null
+              sudo mv "${d}/modules.dep.new" "${d}/modules.dep"
+            fi
+
+            # modules.alias — alias entries pointing at cnss; safe to drop those lines.
+            if [ -f "${d}/modules.alias" ]; then
+              sudo sed -i -E "/[[:space:]](${CNSS_RE})\$/d" "${d}/modules.alias"
+            fi
+
+            # modules.softdep — soft deps; drop any line referencing cnss.
+            if [ -f "${d}/modules.softdep" ]; then
+              sudo sed -i -E "/\\b(${CNSS_RE})\\b/d" "${d}/modules.softdep"
+            fi
+          done
+          echo "Stripped CNSS references from module metadata."
 
           # 7. CRC verification: ensure every replaced module has a matching
           #    vermagic. Print first replaced .ko's vermagic for visibility.
