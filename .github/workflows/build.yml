@@ -203,7 +203,7 @@ jobs:
       - name: Generate Cache Key
         id: cache_key
         run: |
-          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v542" >> $GITHUB_OUTPUT
+          echo "suffix=${{ github.event.inputs.kernel_branch }}-${{ github.event.inputs.region }}-${{ github.event.inputs.feature_profile }}-${{ env.SUKISU_REF }}-v543" >> $GITHUB_OUTPUT
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -460,46 +460,38 @@ jobs:
               "$f"
           done < <(find -L KernelSU drivers/kernelsu -path '*/infra/file_wrapper.c' -type f 2>/dev/null)
 
-          echo "::notice::Applying Safe Dummy Macros for dispatch.c"
+          # v5.4.3: removed the "Safe Dummy Macros" injection for dispatch.c.
+          # Samsung 5.4 already provides tasklist_lock, init_task, task_pgrp,
+          # task_session, change_pid via include/linux/sched/signal.h and
+          # init/init_task.c. The previous dummy macros (notably
+          # `#define init_group 3`) clobbered SukiSU's local variable name
+          # `struct pid *init_group = task_pgrp(&init_task);` and produced a
+          # syntax error in dispatch.c:640. Real symbols compile and work.
+          #
+          # Make sure the proper sched headers are visible in dispatch.c so the
+          # inline helpers task_pgrp/task_session resolve.
           while IFS= read -r f; do
             [ -f "$f" ] || continue
+            # Strip any previously-injected dummy block (idempotent).
             python3 - "$f" <<'PY'
+          import re, sys
           from pathlib import Path
-          import sys
           p = Path(sys.argv[1])
           s = p.read_text()
-          original = s
-          macro_injection = """
-          /* KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS */
-          #ifndef KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS
-          #define KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS
-          #include <linux/rwlock.h>
-          static DEFINE_RWLOCK(ksu_dummy_tasklist_lock);
-          #define tasklist_lock ksu_dummy_tasklist_lock
-          extern struct task_struct ksu_dummy_init_task;
-          #define init_task ksu_dummy_init_task
-          #ifndef task_session
-          #define task_session(x) (((void*)(x)) == ((void*)&ksu_dummy_init_task) ? 1 : 2)
-          #endif
-          #ifndef task_pgrp
-          #define task_pgrp(x) (((void*)(x)) == ((void*)&ksu_dummy_init_task) ? 1 : 2)
-          #endif
-          #ifndef init_group
-          #define init_group 3
-          #endif
-          #endif
-          """
-          if 'KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS' not in s:
-              lines = s.splitlines()
-              insert_idx = 0
-              for i, line in enumerate(lines):
-                  if line.startswith('#include '):
-                      insert_idx = i + 1
-              lines.insert(insert_idx, macro_injection)
-              s = '\n'.join(lines) + '\n'
-          if s != original:
-              p.write_text(s)
+          new = re.sub(
+              r'\s*/\* KSU_SM7325_INDESTRUCTIBLE_DUMMY_MACROS \*/.*?#endif\s*\n',
+              '\n', s, count=1, flags=re.DOTALL)
+          if new != s:
+              p.write_text(new)
           PY
+            # Ensure required sched headers are present.
+            if ! grep -q '<linux/sched/signal\.h>' "$f"; then
+              sed -i '/^#include <linux\/types\.h>/a #include <linux/sched/signal.h>' "$f" \
+                || sed -i '1i #include <linux/sched/signal.h>' "$f"
+            fi
+            if ! grep -q '<linux/sched/task\.h>' "$f"; then
+              sed -i '/^#include <linux\/sched\/signal\.h>/a #include <linux/sched/task.h>' "$f"
+            fi
           done < <(find -L KernelSU drivers/kernelsu -path '*/supercall/dispatch.c' -type f 2>/dev/null)
 
           echo "::notice::Stubbing optional manager/policy files"
