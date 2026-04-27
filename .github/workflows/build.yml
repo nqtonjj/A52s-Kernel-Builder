@@ -540,47 +540,9 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/manager/pkg_observer.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          int ksu_app_profile_init(void) { return 0; }
-          void ksu_app_profile_exit(void) {}
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
-
-          while IFS= read -r f; do [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          int ksu_rules_init(void) { return 0; }
-          void ksu_rules_exit(void) {}
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
-
-          while IFS= read -r f; do [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          #include "sepolicy.h"
-          struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol) { return old_pol; }
-          void ksu_destroy_sepolicy(struct selinux_policy *orig) { (void)orig; }
-          bool ksu_type(struct policydb *db, const char *name, const char *attr) { return true; }
-          bool ksu_attribute(struct policydb *db, const char *name) { return true; }
-          bool ksu_permissive(struct policydb *db, const char *type) { return true; }
-          bool ksu_enforce(struct policydb *db, const char *type) { return true; }
-          bool ksu_typeattribute(struct policydb *db, const char *type, const char *attr) { return true; }
-          bool ksu_exists(struct policydb *db, const char *type) { return false; }
-          bool ksu_allow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
-          bool ksu_deny(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
-          bool ksu_auditallow(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
-          bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *perm) { return true; }
-          bool ksu_allowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
-          bool ksu_auditallowxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
-          bool ksu_dontauditxperm(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *range) { return true; }
-          bool ksu_type_transition(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def, const char *obj) { return true; }
-          bool ksu_type_change(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return true; }
-          bool ksu_type_member(struct policydb *db, const char *src, const char *tgt, const char *cls, const char *def) { return true; }
-          bool ksu_genfscon(struct policydb *db, const char *fs_name, const char *path, const char *ctx) { return true; }
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
+          # v5.4.5: DO NOT stub policy/app_profile.c, selinux/rules.c, selinux/sepolicy.c.
+          # The real source provides escape_with_root_profile, escape_to_root_for_init,
+          # apply_kernelsu_rules, handle_sepolicy required by kernelsu link.
 
           echo "::notice::Injecting minmax.h"
           mkdir -p include/linux
@@ -622,8 +584,16 @@ jobs:
             grep -q 'ksu_compat_linkfix\.o' "$mk" || printf '\nobj-$(CONFIG_KSU) += ksu_compat_linkfix.o\n' >> "$mk"
           done
 
-      - name: Apply SukiSU manual hook patches for non-GKI
+      - name: SukiSU-Ultra hooking strategy notice (v5.4.5)
         if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
+        shell: bash
+        run: |
+          echo "::notice::SukiSU-Ultra commit 911b075 uses LSM + kprobes runtime hooking (hook/lsm_hook.c, hook/arm64/syscall_hook.c)."
+          echo "::notice::This fork DOES NOT support classic ksu_handle_execveat/vfs_read manual fs/*.c patches."
+          echo "::notice::Manual hook patches are SKIPPED. Hooks activate at runtime via CONFIG_KPROBES=y + LSM bridge."
+
+      - name: (DISABLED) Apply SukiSU manual hook patches for non-GKI
+        if: ${{ false }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -1132,8 +1102,10 @@ jobs:
           if [ ! -x "${STRINGS}" ]; then
             STRINGS=strings
           fi
+          # v5.4.5: SukiSU-Ultra fork uses LSM + kprobes runtime hooks; check
+          # symbols that DO exist in this fork (not classic ksu_handle_execveat).
           MISSING_SYMS=()
-          for sym in ksu_handle_execveat ksu_handle_faccessat ksu_handle_vfs_read ksu_handle_stat ksu_handle_input_handle_event ksu_handle_prctl; do
+          for sym in ksu_handle_stat ksu_handle_faccessat escape_with_root_profile escape_to_root_for_init apply_kernelsu_rules ksu_handle_execveat_ksud ksu_handle_input_handle_event; do
             if ! "${STRINGS}" "${VMLINUX}" 2>/dev/null | grep -q "${sym}"; then
               MISSING_SYMS+=("${sym}")
             fi
