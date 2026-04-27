@@ -290,6 +290,117 @@ jobs:
           grep -q 'kernelsu/' drivers/Makefile
           grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
 
+      - name: Inject CONFIG_KSU_SUSFS Kconfig block (v5.4.7)
+        if: ${{ github.event.inputs.feature_profile == 'full' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd kernel
+          KCONFIG=KernelSU/kernel/Kconfig
+          [ -f "$KCONFIG" ] || { echo "::error::$KCONFIG missing"; exit 1; }
+
+          if grep -q '^config KSU_SUSFS$' "$KCONFIG"; then
+            echo "::notice::CONFIG_KSU_SUSFS already in Kconfig"
+            exit 0
+          fi
+
+          # SukiSU-Ultra 911b075 doesn't define CONFIG_KSU_SUSFS — its Kconfig
+          # ends after KSU_DISABLE_POLICY. The susfs4ksu upstream patch
+          # (KernelSU/10_enable_susfs_for_ksu.patch) doesn't apply because line
+          # offsets differ. Inject the SUSFS menu block directly.
+          # Strip any pre-existing trailing endmenu (none expected here).
+          sed -i '/^endmenu$/d' "$KCONFIG"
+
+          cat >> "$KCONFIG" <<'EOF'
+
+          menu "KernelSU - SUSFS"
+          config KSU_SUSFS
+              bool "KernelSU addon - SUSFS"
+              depends on KSU
+              default y
+              help
+                Patch and Enable SUSFS to kernel with KernelSU.
+
+          config KSU_SUSFS_HAS_MAGIC_MOUNT
+              bool "Magic mount support flag"
+              depends on KSU
+              default y
+
+          config KSU_SUSFS_SUS_PATH
+              bool "Hide suspicious paths"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SUS_MOUNT
+              bool "Hide suspicious mounts"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+              bool "Auto-add KSU default mounts as sus"
+              depends on KSU_SUSFS_SUS_MOUNT
+              default y
+
+          config KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+              bool "Auto-add bind mounts as sus"
+              depends on KSU_SUSFS_SUS_MOUNT
+              default y
+
+          config KSU_SUSFS_SUS_KSTAT
+              bool "Spoof kstat"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SUS_OVERLAYFS
+              bool "Auto-spoof overlay kstat"
+              depends on KSU_SUSFS
+              default n
+
+          config KSU_SUSFS_TRY_UMOUNT
+              bool "Use ksu_try_umount"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+              bool "Auto-add bind mounts to ksu_try_umount"
+              depends on KSU_SUSFS_TRY_UMOUNT
+              default y
+
+          config KSU_SUSFS_SPOOF_UNAME
+              bool "Spoof uname"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_ENABLE_LOG
+              bool "Enable susfs log"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+              bool "Hide ksu/susfs symbols from /proc/kallsyms"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+              bool "Spoof /proc/cmdline or /proc/bootconfig"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_OPEN_REDIRECT
+              bool "Redirect open() to user-defined files"
+              depends on KSU_SUSFS
+              default y
+
+          config KSU_SUSFS_SUS_SU
+              bool "Enable sus_su (kprobe-based su)"
+              depends on KSU_SUSFS
+              default y
+          endmenu
+          EOF
+
+          echo "::notice::Injected SUSFS Kconfig block"
+          grep -c '^config KSU_SUSFS' "$KCONFIG"
+
       - name: Verify SukiSU version supports SUSFS
         if: ${{ github.event.inputs.feature_profile == 'full' }}
         shell: bash
