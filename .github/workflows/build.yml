@@ -411,6 +411,66 @@ jobs:
           ENDMENU_COUNT=$(grep -c '^endmenu' "$KCONFIG")
           [ "$MENU_COUNT" = "$ENDMENU_COUNT" ] || { echo "::error::Kconfig menu/endmenu unbalanced: $MENU_COUNT vs $ENDMENU_COUNT"; exit 1; }
 
+      - name: Patch kernel/module.c to bypass MODVERSIONS CRC check (v5.4.11)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd kernel
+          MOD_C="kernel/module.c"
+          [ -f "$MOD_C" ] || { echo "::error::$MOD_C missing"; exit 1; }
+
+          # Why: even when kernel and modules are co-built, our CONFIG_KSU=y +
+          # SUSFS injection can subtly alter struct CRCs (genksyms recurses
+          # through types reached from struct module). Result: stm_ts.ko +
+          # qca_cld3_*.ko fail with "disagrees about version of symbol
+          # module_layout" and ZERO modules load. v5.4.10 was confirmed boot
+          # OK with vmlinux from this build, but lsmod=0.
+          # Fix: short-circuit check_version() to ALWAYS pass. This skips the
+          # __versions CRC check entirely, equivalent to "modprobe -f" for
+          # every module load attempt globally.
+
+          # Idempotent guard: only patch once.
+          if grep -q 'V5_4_11_FORCE_CRC_BYPASS' "$MOD_C"; then
+            echo "::notice::module.c already patched"
+          else
+            python3 - "$MOD_C" <<'PYEOF'
+          import re, sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          # Patch BOTH check_version() and check_modstruct_version() to always
+          # return 1. These are the functions kernel/module.c uses to enforce
+          # MODVERSIONS CRC equality; bypassing them is equivalent to passing
+          # MODULE_INIT_IGNORE_MODVERSIONS for every module load.
+          targets = [
+              r'(static\s+int\s+check_version\s*\([^)]*\)\s*\{)',
+              r'(static\s+int\s+check_modstruct_version\s*\([^)]*\)\s*\{)',
+          ]
+          inj = (
+              "\n\t/* V5_4_11_FORCE_CRC_BYPASS: short-circuit MODVERSIONS check */\n"
+              "\treturn 1;\n"
+          )
+          patched_any = False
+          for pat in targets:
+              rx = re.compile(pat, re.DOTALL)
+              m = rx.search(src)
+              if not m:
+                  print(f"::warning::pattern not found: {pat}")
+                  continue
+              src = src[:m.end()] + inj + src[m.end():]
+              patched_any = True
+              print(f"Patched: {pat[:60]}...")
+          if not patched_any:
+              sys.stderr.write("::error::No CRC-check function patched. Aborting.\n")
+              sys.exit(1)
+          p.write_text(src)
+          PYEOF
+            grep -cn 'V5_4_11_FORCE_CRC_BYPASS' "$MOD_C" || true
+          fi
+
+          # Sanity: ensure CONFIG_MODULE_FORCE_LOAD and FORCE_UNLOAD will be set
+          # later in the defconfig patch step (informational).
+          echo "::notice::module.c CRC bypass patch applied; defconfig will also enable CONFIG_MODULE_FORCE_LOAD."
+
       - name: Verify SukiSU version supports SUSFS
         if: ${{ github.event.inputs.feature_profile == 'full' }}
         shell: bash
@@ -1137,6 +1197,31 @@ jobs:
           enable_cfg CONFIG_KALLSYMS
           enable_cfg CONFIG_KPROBES
 
+          # v5.4.11: Module CRC mismatch fix.
+          # Symptom: v5.4.10 boot OK but ZERO modules loaded (touch+wifi dead).
+          # Cause: vendor still has stock prebuilt .ko files (110+ modules we
+          # don't rebuild). Their __versions CRCs were computed against stock
+          # Samsung kernel. Our v5.4.10 kernel has CONFIG_KSU=y + CONFIG_KSU_SUSFS=y
+          # which can subtly change struct layouts -> different CRCs ->
+          # "disagrees about version of symbol module_layout" -> reject.
+          # When stm_ts.ko depends on a stale module (or when init bails after
+          # first failure), nothing loads.
+          # Fixes:
+          #   1. CONFIG_MODULE_FORCE_LOAD=y -> insmod -f works
+          #   2. CONFIG_MODULE_FORCE_UNLOAD=y -> rmmod -f works
+          #   3. CONFIG_MODVERSIONS still =y, but with FORCE_LOAD modules can
+          #      still load with crcfail warning (better than silent reject)
+          # Combined with INSTALL_MOD_STRIP=0 (preserve __versions section)
+          # and an init.rc patch that uses insmod -f, this should let all
+          # vendor modules load.
+          enable_cfg CONFIG_MODULE_FORCE_LOAD
+          enable_cfg CONFIG_MODULE_FORCE_UNLOAD
+          # Disable strict module signing so unsigned/wrongly-signed modules
+          # are not rejected outright. Samsung's stock kernel sometimes has
+          # MODULE_SIG_FORCE=y; we override.
+          disable_cfg CONFIG_MODULE_SIG_FORCE
+          disable_cfg CONFIG_MODULE_SIG_ALL
+
           # v5.4 NOTE: CNSS family is left as BUILT-IN (=y) — switching to =m
           # would break CNSS2_QMI=y (bool depends on tristate). Instead, the
           # vendor-repack step below DELETES the stock cnss/icnss .ko files
@@ -1313,7 +1398,7 @@ jobs:
             set +e
             make "${COMMON_ARGS[@]}" \
                  INSTALL_MOD_PATH="${out_dir}/modules_out" \
-                 INSTALL_MOD_STRIP=1 \
+                 INSTALL_MOD_STRIP=0 \
                  -j"$(nproc --all)" modules_install \
                  2>&1 | tee "${GITHUB_WORKSPACE}/09b-modules-install-${tag}.log"
             BUILD_RC=${PIPESTATUS[0]}
@@ -1372,6 +1457,23 @@ jobs:
               echo "::error::profile=full but CONFIG_KSU_SUSFS not =y"
               exit 1
             }
+          fi
+          # v5.4.11: verify CRC bypass + force-load are active.
+          grep -q '^CONFIG_MODULE_FORCE_LOAD=y' "${KCONFIG}" || {
+            echo "::error::CONFIG_MODULE_FORCE_LOAD is NOT =y (module CRC bypass incomplete)"
+            grep -E 'CONFIG_MODULE_FORCE' "${KCONFIG}" || true
+            exit 1
+          }
+          # Sanity: source patch should be present in the kernel source tree
+          # (we cd'd back to repo root; module.c lives in kernel/kernel/module.c
+          # because the kernel source itself is checked out into ./kernel).
+          if [ -f kernel/kernel/module.c ]; then
+            if grep -q 'V5_4_11_FORCE_CRC_BYPASS' kernel/kernel/module.c; then
+              echo "::notice::module.c V5_4_11_FORCE_CRC_BYPASS patch present in source"
+            else
+              echo "::error::module.c missing V5_4_11_FORCE_CRC_BYPASS marker — patch step did not run."
+              exit 1
+            fi
           fi
           echo "::endgroup::"
 
