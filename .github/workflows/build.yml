@@ -412,6 +412,7 @@ jobs:
           [ "$MENU_COUNT" = "$ENDMENU_COUNT" ] || { echo "::error::Kconfig menu/endmenu unbalanced: $MENU_COUNT vs $ENDMENU_COUNT"; exit 1; }
 
       - name: Patch kernel/module.c to bypass MODVERSIONS CRC check (v5.4.11)
+        if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -1396,9 +1397,13 @@ jobs:
             
             # Install modules (stripped) into modules_out/ for vendor.img repack.
             set +e
+            # NOTE: do NOT pass INSTALL_MOD_STRIP=0 — kernel's scripts/Makefile.modinst
+            # treats any non-empty value (including "0") as strip-flags and runs
+            # `$(STRIP) 0` which fails with "'0': No such file or directory".
+            # Leaving INSTALL_MOD_STRIP UNSET makes mod_strip_cmd = true (no-op),
+            # which is what we want: __versions / .modinfo sections preserved.
             make "${COMMON_ARGS[@]}" \
                  INSTALL_MOD_PATH="${out_dir}/modules_out" \
-                 INSTALL_MOD_STRIP=0 \
                  -j"$(nproc --all)" modules_install \
                  2>&1 | tee "${GITHUB_WORKSPACE}/09b-modules-install-${tag}.log"
             BUILD_RC=${PIPESTATUS[0]}
@@ -1846,7 +1851,9 @@ jobs:
             truncate -s "${ORIG_SIZE}" vendor-patched.img
             echo "Padded patched image to ${ORIG_SIZE} bytes"
           elif [ "${NEW_SIZE}" -gt "${ORIG_SIZE}" ]; then
-            echo "::warning::patched image (${NEW_SIZE}) larger than stock (${ORIG_SIZE}). May not fit super slot."
+            echo "::error::patched image (${NEW_SIZE}) larger than stock (${ORIG_SIZE}). Will not fit super slot."
+            echo "::error::Either reduce module count, switch to lower compression level, or shrink rebuilt modules."
+            exit 1
           fi
 
           mv vendor-patched.img "${GITHUB_WORKSPACE}/"
