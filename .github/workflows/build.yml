@@ -1397,13 +1397,19 @@ jobs:
             
             # Install modules (stripped) into modules_out/ for vendor.img repack.
             set +e
-            # NOTE: do NOT pass INSTALL_MOD_STRIP=0 — kernel's scripts/Makefile.modinst
-            # treats any non-empty value (including "0") as strip-flags and runs
-            # `$(STRIP) 0` which fails with "'0': No such file or directory".
-            # Leaving INSTALL_MOD_STRIP UNSET makes mod_strip_cmd = true (no-op),
-            # which is what we want: __versions / .modinfo sections preserved.
+            # NOTE on INSTALL_MOD_STRIP semantics in scripts/Makefile.modinst (5.4):
+            #   undefined          -> mod_strip_cmd = true    (NO strip, modules HUGE w/ debug info,
+            #                                                  vendor.img repack overflows stock size)
+            #   INSTALL_MOD_STRIP=1 -> mod_strip_cmd = $(STRIP) --strip-debug
+            #                                                 (strip ONLY .debug_* sections; __versions,
+            #                                                  .modinfo, vermagic ALL preserved)
+            #   any other value     -> $(STRIP) <value>   (treats value as flag/file -> errors)
+            # We want STRIP=1: removes ~80% of module size (debug info), but keeps __versions
+            # which our patched check_version() bypasses anyway. This brings vendor.img
+            # back under stock size and is safe for our CRC-bypass strategy.
             make "${COMMON_ARGS[@]}" \
                  INSTALL_MOD_PATH="${out_dir}/modules_out" \
+                 INSTALL_MOD_STRIP=1 \
                  -j"$(nproc --all)" modules_install \
                  2>&1 | tee "${GITHUB_WORKSPACE}/09b-modules-install-${tag}.log"
             BUILD_RC=${PIPESTATUS[0]}
