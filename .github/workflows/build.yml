@@ -472,6 +472,64 @@ jobs:
           # later in the defconfig patch step (informational).
           echo "::notice::module.c CRC bypass patch applied; defconfig will also enable CONFIG_MODULE_FORCE_LOAD."
 
+      - name: Patch kernel/printk/printk.c to bypass DMESG_RESTRICT (v5.4.11.3)
+        if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd kernel
+          PRINTK_C="kernel/printk/printk.c"
+          [ -f "$PRINTK_C" ] || { echo "::error::$PRINTK_C missing"; exit 1; }
+
+          # Why: v5.4.11.2 boots with touch+wifi but KSU is not initializing
+          # (su not found, manager Hook=Unknown). We have NO visibility into
+          # kernel logs because:
+          #   1) Samsung kernel sets CONFIG_SECURITY_DMESG_RESTRICT=y by default
+          #   2) /dev/kmsg is root-only on production builds
+          #   3) Without root we cannot diagnose KSU init failure
+          # Fix: short-circuit check_syslog_permissions() in kernel/printk.c
+          # to ALWAYS return 0. This makes `adb shell dmesg` work for the shell
+          # user without root, exposing the entire kernel ring buffer including
+          # KSU init traces (sys_call_table=0x?, register_kprobe result, etc.)
+          # SECURITY NOTE: this is a DEBUG kernel — do not ship to end users.
+
+          if grep -q 'V5_4_11_3_DMESG_BYPASS' "$PRINTK_C"; then
+            echo "::notice::printk.c already patched"
+          else
+            python3 - "$PRINTK_C" <<'PYEOF'
+          import re, sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          # Patch check_syslog_permissions() to always return 0 (allow).
+          # Signature in 5.4: int check_syslog_permissions(int type, int source)
+          targets = [
+              r'(int\s+check_syslog_permissions\s*\([^)]*\)\s*\{)',
+              r'(static\s+int\s+check_syslog_permissions\s*\([^)]*\)\s*\{)',
+          ]
+          inj = (
+              "\n\t/* V5_4_11_3_DMESG_BYPASS: allow shell user to read dmesg */\n"
+              "\treturn 0;\n"
+          )
+          patched_any = False
+          for pat in targets:
+              rx = re.compile(pat, re.DOTALL)
+              m = rx.search(src)
+              if not m:
+                  continue
+              src = src[:m.end()] + inj + src[m.end():]
+              patched_any = True
+              print(f"Patched: {pat[:60]}...")
+              break  # only patch first match
+          if not patched_any:
+              sys.stderr.write("::error::check_syslog_permissions not found.\n")
+              sys.exit(1)
+          p.write_text(src)
+          PYEOF
+            grep -cn 'V5_4_11_3_DMESG_BYPASS' "$PRINTK_C" || true
+          fi
+
+          echo "::notice::printk.c DMESG_RESTRICT bypass applied (v5.4.11.3 debug kernel)"
+
       - name: Verify SukiSU version supports SUSFS
         if: ${{ github.event.inputs.feature_profile == 'full' }}
         shell: bash
@@ -1290,7 +1348,28 @@ jobs:
           esac
 
           disable_cfg CONFIG_KPM
-          disable_cfg CONFIG_KSU_DEBUG
+          # v5.4.11.3: enable KSU_DEBUG to get verbose KSU init logs (pr_info
+          # traces in init.c, syscall_hook_init, register_kprobe result, etc.)
+          enable_cfg CONFIG_KSU_DEBUG
+
+          # v5.4.11.3: enable KPROBES_ON_FTRACE for kprobe stability on Samsung.
+          # Without ftrace backing, kprobe uses raw breakpoint instructions that
+          # can fail on hardened kernels (RKP/CFI/PAC). With ftrace backing,
+          # kprobes use the ftrace trampoline which is already authorized to
+          # patch text. This often fixes "register_kprobe failed" silent errors.
+          # Prereqs: FUNCTION_TRACER + DYNAMIC_FTRACE.
+          enable_cfg CONFIG_FUNCTION_TRACER
+          enable_cfg CONFIG_DYNAMIC_FTRACE
+          enable_cfg CONFIG_DYNAMIC_FTRACE_WITH_REGS
+          enable_cfg CONFIG_KPROBES_ON_FTRACE
+          enable_cfg CONFIG_FTRACE_SYSCALLS
+          enable_cfg CONFIG_HAVE_SYSCALL_TRACEPOINTS
+
+          # v5.4.11.3: open up dmesg for shell user. CONFIG_SECURITY_DMESG_RESTRICT
+          # may still be flipped to =y by Samsung defconfig overlays; the printk.c
+          # patch above is the belt-and-suspenders solution (always return 0
+          # in check_syslog_permissions). Setting these to =n is best effort.
+          disable_cfg CONFIG_SECURITY_DMESG_RESTRICT
 
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
             for key in \
