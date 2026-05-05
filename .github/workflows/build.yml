@@ -1386,6 +1386,28 @@ jobs:
           sed -i '/^CONFIG_LOG_CPU_MAX_BUF_SHIFT=/d' "${KCONFIG}"
           echo "CONFIG_LOG_CPU_MAX_BUF_SHIFT=16" >> "${KCONFIG}"
 
+          # v5.4.11.4: SukiSU-Ultra commit 911b0757 syscall_hook_manager.c uses
+          # BOTH register_kretprobe (CONFIG_KRETPROBES) on syscall_regfunc/
+          # syscall_unregfunc AND register_trace_sys_enter (CONFIG_HAVE_SYSCALL_TRACEPOINTS).
+          # The kretprobe is for tracepoint marker tracking; the tracepoint
+          # is the ACTUAL syscall interception mechanism (replacing old
+          # raw-kprobe-on-syscall pattern). Both must work.
+          # Force explicit =y for KRETPROBES (Samsung defconfig sometimes
+          # has it implicit and may toggle off based on KPROBES sub-options).
+          enable_cfg CONFIG_KRETPROBES
+          enable_cfg CONFIG_HAVE_KRETPROBES
+          # KSU has `depends on KPROBES && EXT4_FS` so EXT4_FS=y is mandatory.
+          # Samsung uses EXT4 for vendor partition so this should be on, but
+          # ensure explicitly to fail-fast at config time if not.
+          enable_cfg CONFIG_EXT4_FS
+          # Tracepoint subsystem must be on (Samsung default but verify).
+          enable_cfg CONFIG_TRACEPOINTS
+          enable_cfg CONFIG_TRACING
+          # Allow tracepoint registration from modules (for kretprobe-based
+          # tracking). KRETPROBE_BLACKLIST may block syscall_regfunc on some
+          # hardened kernels — force the option that makes them registrable.
+          enable_cfg CONFIG_KPROBE_EVENTS
+
           if [ "${{ github.event.inputs.security_mode }}" = "aggressive" ]; then
             for key in \
               CONFIG_SECURITY_DEFEX_RESTRICT_FILE \
