@@ -1378,13 +1378,13 @@ jobs:
           # Belt-and-suspenders: also add LOG_BUF_SHIFT line directly to
           # defconfig because some kernel Kconfigs cap LOG_BUF_SHIFT at 21
           # unless KEXEC_CORE/CRASH_DUMP is set; explicit value forces it.
-          KCONFIG="${KERNEL_TREE}/arch/arm64/configs/${CONFIG_NAME}_defconfig"
-          sed -i '/^CONFIG_LOG_BUF_SHIFT=/d' "${KCONFIG}"
-          sed -i '/^# CONFIG_LOG_BUF_SHIFT /d' "${KCONFIG}"
-          echo "CONFIG_LOG_BUF_SHIFT=22" >> "${KCONFIG}"
+          # Use existing $DEFCONFIG variable from step start (full path).
+          sed -i '/^CONFIG_LOG_BUF_SHIFT=/d' "${DEFCONFIG}"
+          sed -i '/^# CONFIG_LOG_BUF_SHIFT /d' "${DEFCONFIG}"
+          echo "CONFIG_LOG_BUF_SHIFT=22" >> "${DEFCONFIG}"
           # Also bump per-CPU log buffer if used (CONTEXT_TRACK)
-          sed -i '/^CONFIG_LOG_CPU_MAX_BUF_SHIFT=/d' "${KCONFIG}"
-          echo "CONFIG_LOG_CPU_MAX_BUF_SHIFT=16" >> "${KCONFIG}"
+          sed -i '/^CONFIG_LOG_CPU_MAX_BUF_SHIFT=/d' "${DEFCONFIG}"
+          echo "CONFIG_LOG_CPU_MAX_BUF_SHIFT=16" >> "${DEFCONFIG}"
 
           # v5.4.11.4: SukiSU-Ultra commit 911b0757 syscall_hook_manager.c uses
           # BOTH register_kretprobe (CONFIG_KRETPROBES) on syscall_regfunc/
