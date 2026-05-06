@@ -19,7 +19,7 @@ on:
       kernel_name:
         description: "Kernel display name"
         required: true
-        default: "A52s-KernelSU-Next-SUSFS-v6.1.0"
+        default: "A52s-KernelSU-Next-SUSFS-v6.1.1"
       security_mode:
         description: "Samsung security mode (Aggressive is MANDATORY for boot)"
         required: true
@@ -910,11 +910,29 @@ jobs:
           EOF
 
           # CRITICAL v5.4.6: register link-fix in Kbuild (not Makefile) so it
-          # actually compiles in-tree. Insert after `kernelsu-objs := core/init.o`.
+          # actually compiles in-tree.
+          # v6.1.1: KSN legacy-susfs Kbuild starts with `kernelsu-objs := ksu.o`
+          # (not SukiSU's `core/init.o`). Try matching either pattern, and as a
+          # final fallback append unconditionally so the entry is always present.
           for kb in KernelSU/kernel/Kbuild drivers/kernelsu/Kbuild; do
             [ -f "$kb" ] || continue
-            grep -q 'ksu_compat_linkfix\.o' "$kb" || \
+            if grep -q 'ksu_compat_linkfix\.o' "$kb"; then
+              continue
+            fi
+            # Match KSN legacy-susfs pattern first.
+            if grep -q '^kernelsu-objs := ksu\.o' "$kb"; then
+              sed -i '0,/^kernelsu-objs := ksu\.o/{s||kernelsu-objs := ksu.o\nkernelsu-objs += ksu_compat_linkfix.o|}' "$kb"
+            # Fall back to SukiSU pattern.
+            elif grep -q '^kernelsu-objs := core\/init\.o' "$kb"; then
               sed -i '0,/^kernelsu-objs := core\/init\.o/{s||kernelsu-objs := core/init.o\nkernelsu-objs += ksu_compat_linkfix.o|}' "$kb"
+            # Match generic first kernelsu-objs := <anything>.
+            elif grep -qE '^kernelsu-objs := [a-zA-Z]' "$kb"; then
+              FIRST_OBJ_LINE=$(grep -nE '^kernelsu-objs := [a-zA-Z]' "$kb" | head -1 | cut -d: -f1)
+              sed -i "${FIRST_OBJ_LINE}a kernelsu-objs += ksu_compat_linkfix.o" "$kb"
+            else
+              # Last-resort: append at top of file (Kbuild parses top-down).
+              { echo 'kernelsu-objs += ksu_compat_linkfix.o'; cat "$kb"; } > "${kb}.new" && mv "${kb}.new" "$kb"
+            fi
           done
           # Belt-and-suspenders: also keep the Makefile entry harmless.
           for mk in KernelSU/kernel/Makefile drivers/kernelsu/Makefile; do
@@ -1185,6 +1203,143 @@ jobs:
           if [ -f "fs/sus_su.c" ]; then
             grep -q 'sus_su\.o' fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS_SUS_SU) += sus_su.o' >> fs/Makefile
           fi
+
+      - name: Inject SUSFS legacy-susfs compat stubs (v6.1.1)
+        if: ${{ github.event.inputs.feature_profile == 'full' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd kernel
+
+          # v6.1.1 ROOT CAUSE FIX:
+          # KSN tag v3.1.0-legacy-susfs (commit ba4422f, "implement susfs v2.0.0
+          # de-inlined") expects an UPSTREAM susfs source that does NOT exist yet
+          # for kernel-5.4. simonpunk's kernel-5.4 branch only has SUSFS v1.5.5
+          # (the inline-hooks version). The legacy-susfs branch CALLS several
+          # functions that v1.5.5 does not provide -> linker errors:
+          #
+          #   UNCONDITIONAL (always called when CONFIG_KSU_SUSFS=y):
+          #     susfs_set_current_proc_umounted   (setuid_hook.c:160)
+          #     susfs_is_current_proc_umounted    (supercalls.c:459)
+          #     susfs_set_avc_log_spoofing        (supercalls.c:936)
+          #     susfs_get_enabled_features        (supercalls.c:940)
+          #     susfs_show_variant                (supercalls.c:944)
+          #     susfs_show_version                (supercalls.c:948)
+          #
+          #   GUARDED by sub-features (skipped because we disable all sub-features):
+          #     susfs_run_sus_path_loop, susfs_reorder_mnt_id,
+          #     susfs_add_sus_path_loop, susfs_set_i_state_on_external_dir,
+          #     susfs_set_hide_sus_mnts_for_non_su_procs, susfs_add_sus_map,
+          #     susfs_enable_log
+          #
+          # FIX: provide weak no-op stubs in fs/susfs_legacy_stubs.c. The "weak"
+          # attribute means: if a real implementation appears later (e.g. user
+          # upgrades simonpunk to v2.0.0), it overrides the stubs without
+          # rebuild conflicts. Returning false/0 is safe — these are accessor
+          # / informational endpoints, not security-critical paths.
+          STUB_FILE=fs/susfs_legacy_stubs.c
+          cat > "${STUB_FILE}" <<'EOF'
+          // SPDX-License-Identifier: GPL-2.0
+          //
+          // Compat stubs for KSN v3.1.0-legacy-susfs (commit ba4422f) which
+          // expects a "v2.0.0 de-inlined" SUSFS implementation that simonpunk
+          // kernel-5.4 (v1.5.5) does not yet provide.
+          //
+          // All stubs are __weak so a real upstream implementation overrides
+          // them transparently. Stubs return success values (false / 0) so
+          // calling code falls through to default kernel behavior.
+
+          #include <linux/types.h>
+          #include <linux/compiler.h>
+          #include <linux/uaccess.h>
+          #include <linux/printk.h>
+
+          // Per-task umount tracking — used by setuid_hook.c after handle_setresuid
+          // and by supercalls.c manage_mark logic. Returning false means
+          // "process has not been umounted yet" — calling code then proceeds
+          // with default code path (no early-return), which is the safe choice.
+          __weak void susfs_set_current_proc_umounted(void)
+          {
+              // No-op: tracking not implemented in v1.5.5. App still works
+              // because ksu_handle_umount() (called separately) does the actual
+              // umount; this function only marks the umount as DONE so it is
+              // not redone, which is fine to skip.
+          }
+
+          __weak bool susfs_is_current_proc_umounted(void)
+          {
+              return false;
+          }
+
+          // Manager UI / informational ioctls — return 0 ("no features
+          // reported") so Manager just shows empty SUSFS fields.
+          __weak int susfs_get_enabled_features(unsigned long arg)
+          {
+              return 0;
+          }
+
+          __weak int susfs_show_variant(unsigned long arg)
+          {
+              return 0;
+          }
+
+          __weak int susfs_show_version(unsigned long arg)
+          {
+              return 0;
+          }
+
+          // AVC log spoofing — disabled in v6.1.1 stub mode. Manager configures
+          // this; ignoring the configure call is safe (logs flow normally).
+          __weak int susfs_set_avc_log_spoofing(unsigned long arg)
+          {
+              return 0;
+          }
+
+          // Sub-feature endpoints (compiled out by their CONFIGs in v6.1.1
+          // defconfig, but provide weak stubs anyway so re-enabling a single
+          // sub-feature won't cause linker failure during testing).
+          __weak void susfs_run_sus_path_loop(uid_t uid)
+          {
+          }
+
+          __weak void susfs_reorder_mnt_id(void)
+          {
+          }
+
+          __weak int susfs_add_sus_path_loop(unsigned long arg)
+          {
+              return 0;
+          }
+
+          __weak int susfs_set_i_state_on_external_dir(unsigned long arg)
+          {
+              return 0;
+          }
+
+          __weak int susfs_set_hide_sus_mnts_for_non_su_procs(unsigned long arg)
+          {
+              return 0;
+          }
+
+          __weak int susfs_add_sus_map(unsigned long arg)
+          {
+              return 0;
+          }
+
+          __weak int susfs_enable_log(unsigned long arg)
+          {
+              return 0;
+          }
+          EOF
+
+          # Hook into fs/Makefile under CONFIG_KSU_SUSFS so the stubs compile
+          # together with susfs.o.
+          if ! grep -q 'susfs_legacy_stubs\.o' fs/Makefile; then
+            echo 'obj-$(CONFIG_KSU_SUSFS) += susfs_legacy_stubs.o' >> fs/Makefile
+          fi
+
+          echo "::notice::SUSFS legacy-susfs compat stubs injected at ${STUB_FILE}"
+          grep 'susfs_legacy_stubs' fs/Makefile
 
       - name: Force-inject linux/susfs_def.h into all SUSFS users (v5.4.8)
         if: ${{ github.event.inputs.feature_profile == 'full' }}
