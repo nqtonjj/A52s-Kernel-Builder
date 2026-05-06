@@ -638,29 +638,43 @@ jobs:
             sed -i 's|<linux/pgtable.h>|<linux/mm.h>|g' "$f"
           done < <(grep -RIl --include='*.c' --include='*.h' '<linux/pgtable.h>' KernelSU drivers/kernelsu 2>/dev/null || true)
 
-          echo "::notice::Patching _nofault functions"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            sed -i \
-              -e 's/strncpy_from_user_nofault/strncpy_from_user/g' \
-              -e 's/copy_from_user_nofault/copy_from_user/g' \
-              -e 's/copy_to_user_nofault/copy_to_user/g' \
-              -e 's/copy_from_kernel_nofault/probe_kernel_read/g' \
-              -e 's/copy_to_kernel_nofault/probe_kernel_write/g' \
-              "$f"
-            grep -q '<linux/uaccess.h>' "$f" || sed -i '1i #include <linux/uaccess.h>' "$f"
-          done < <(grep -RIlE 'strncpy_from_user_nofault|copy_from_user_nofault|copy_to_user_nofault|copy_from_kernel_nofault|copy_to_kernel_nofault' KernelSU drivers/kernelsu 2>/dev/null || true)
-
-          echo "::notice::Global TWA_RESUME/TWA_SIGNAL compat for Samsung 5.4"
-          while IFS= read -r f; do
-            [ -f "$f" ] || continue
-            sed -i \
-              -e 's/\bTWA_RESUME\b/1/g' \
-              -e 's/\bTWA_SIGNAL\b/1/g' \
-              -e 's/\bTWA_SIGNAL_NO_IPI\b/1/g' \
-              -e 's/\bTWA_NONE\b/0/g' \
-              "$f"
-          done < <(grep -RIlE '\bTWA_RESUME\b|\bTWA_SIGNAL\b|\bTWA_SIGNAL_NO_IPI\b|\bTWA_NONE\b' KernelSU drivers/kernelsu 2>/dev/null || true)
+          # v6.1.2 ROOT-CAUSE FIX:
+          # KSN legacy-susfs has its OWN compatibility layer for these symbols:
+          #
+          #   * strncpy_from_user_nofault: KSN auto-detects via Kbuild line 218
+          #     (greps include/linux/uaccess.h). On Samsung 5.4 the symbol does
+          #     not exist, so KSN provides its own inline implementation in
+          #     kernel_compat.c (#ifndef KSU_OPTIONAL_STRNCPY block).
+          #
+          #   * copy_from_user_nofault: KSN wraps it via ksu_copy_from_user_nofault
+          #     in kernel_compat.c with #if LINUX_VERSION_CODE >= 5.8 guard.
+          #     On 5.4 the fallback (set_fs/pagefault_disable) is used; the symbol
+          #     copy_from_user_nofault is never referenced.
+          #
+          #   * copy_{to_user,from/to_kernel}_nofault: not referenced by KSN.
+          #
+          #   * TWA_RESUME / TWA_SIGNAL / TWA_NONE: KSN's kernel_compat.h has
+          #     "#if LINUX_VERSION_CODE < 5.7 -> #define TWA_RESUME true". This
+          #     header is transitively included by allowlist.h / setuid_hook.h /
+          #     su_mount_ns.h / ksud.c / etc. On Samsung 5.4 this gives the
+          #     correct (pre-5.7) signature for task_work_add(..., bool).
+          #
+          # The SukiSU-style brute-force renames we used in v5.4.x DESTROY
+          # KSN's compat layer:
+          #   - sed s/strncpy_from_user_nofault/strncpy_from_user/g rewrites the
+          #     extern declaration in kernel_compat.h to clash with the kernel's
+          #     real strncpy_from_user (different signature -> "conflicting
+          #     types" error in allowlist.c).
+          #   - sed s/\bTWA_RESUME\b/1/g rewrites kernel_compat.h's
+          #     "#ifndef TWA_RESUME / #define TWA_RESUME true" into
+          #     "#ifndef 1 / #define 1 true" -> "macro name must be an
+          #     identifier" error.
+          #
+          # CI run 25428114531 (v6.1.1) failed exactly here: allowlist.c:30 ->
+          # su_mount_ns.h:4 -> kernel_compat.h:74,83.
+          #
+          # Fix: do NOT run these renames against KSN. KSN handles 5.4 itself.
+          echo "::notice::Skipping _nofault and TWA_* renames (KSN handles 5.4 natively via kernel_compat.{h,c})"
 
           echo "::notice::Patching global task_work API for Samsung Linux 5.4"
           while IFS= read -r f; do [ -f "$f" ] || continue
