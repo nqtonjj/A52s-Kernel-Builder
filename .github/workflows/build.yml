@@ -76,7 +76,11 @@ jobs:
       KERNEL_REPO: https://github.com/RisenID/kernel_samsung_ascendia_sm7325
       ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
       SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
-      SUKISU_REF: 911b075
+      # v5.4.11.5: Pin to v4.1.2 tag (commit ede8a21, 2026-03-09) to match
+      # Manager v4.1.2 APK's IOCTL/prctl protocol. Previous 911b075 (apr 16)
+      # was ~5 weeks newer than manager → version mismatch → Hook=Unknown.
+      # Tag v4.1.2 = commit ede8a21b (ShirkNeko, signed release).
+      SUKISU_REF: ede8a21
       SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
       SUSFS_REF: kernel-5.4
       AOSP_CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r383902.tar.gz
