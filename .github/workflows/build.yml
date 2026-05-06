@@ -1,4 +1,4 @@
-name: sm7325-a52s-sukisu-susfs-builder
+name: sm7325-a52s-ksun-susfs-builder
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ on:
       kernel_name:
         description: "Kernel display name"
         required: true
-        default: "A52s-SukiSU-Ultra-SUSFS"
+        default: "A52s-KernelSU-Next-SUSFS"
       security_mode:
         description: "Samsung security mode (Aggressive is MANDATORY for boot)"
         required: true
@@ -75,12 +75,15 @@ jobs:
       TARGET_BUILD_VARIANT: user
       KERNEL_REPO: https://github.com/RisenID/kernel_samsung_ascendia_sm7325
       ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
-      SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra
-      # v5.4.11.5: Pin to v4.1.2 tag (commit ede8a21, 2026-03-09) to match
-      # Manager v4.1.2 APK's IOCTL/prctl protocol. Previous 911b075 (apr 16)
-      # was ~5 weeks newer than manager → version mismatch → Hook=Unknown.
-      # Tag v4.1.2 = commit ede8a21b (ShirkNeko, signed release).
-      SUKISU_REF: ede8a21
+      # v6.0.0: Switch to KernelSU-Next (KSN) v3.2.0 (2026-04-14) from SukiSU-Ultra.
+      # Rationale:
+      # - SukiSU 911b075 had IOCTL/prctl mismatch with Manager v4.1.2 (Hook=Unknown)
+      # - KSN v3.2.0 Kconfig: 'depends on KPROBES && EXT4_FS' — works on A52s 5.4
+      # - KSN ecosystem has stable KPatch-Next-Module for runtime kernel patch
+      # - KSN released Apr 14 2026 (fresher than SukiSU v4.1.2 tag from Mar 9)
+      # - Same kernel base (RisenID/kernel_samsung_ascendia_sm7325 + simonpunk SUSFS)
+      SUKISU_REPO: https://github.com/KernelSU-Next/KernelSU-Next
+      SUKISU_REF: v3.2.0
       SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
       SUSFS_REF: kernel-5.4
       AOSP_CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r383902.tar.gz
@@ -250,20 +253,23 @@ jobs:
           echo "defconfig_path=${DEFCONFIG_PATH}" >> "${GITHUB_OUTPUT}"
           echo "out_dir=${GITHUB_WORKSPACE}/out" >> "${GITHUB_OUTPUT}"
 
-      - name: Integrate SukiSU-Ultra
+      - name: Integrate KernelSU-Next (v6)
         if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
         run: |
           set -euxo pipefail
-          LOG="${GITHUB_WORKSPACE}/04-sukisu-integrate.log"
+          LOG="${GITHUB_WORKSPACE}/04-ksun-integrate.log"
           exec > >(tee -a "${LOG}") 2>&1
           cd kernel
 
           rm -rf KernelSU drivers/kernelsu
           git config --global advice.detachedHead false
 
+          # v6.0.0: Integrate KernelSU-Next v3.2.0 via manual clone (not setup.sh)
+          # to match existing driver layout (drivers/kernelsu symlink -> KernelSU/kernel).
           git clone --filter=blob:none --no-checkout "${SUKISU_REPO}" KernelSU
-          git -C KernelSU fetch --depth=256 origin main
+          git -C KernelSU fetch --depth=256 origin main || true
+          git -C KernelSU fetch --depth=1 origin "refs/tags/${SUKISU_REF}:refs/tags/${SUKISU_REF}" || true
           git -C KernelSU checkout "${SUKISU_REF}" || {
             git -C KernelSU fetch --depth=2048 origin main
             git -C KernelSU checkout "${SUKISU_REF}"
@@ -284,11 +290,12 @@ jobs:
           else
             printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
           fi
-          
-          grep -q 'config KSU_MANUAL_HOOK' KernelSU/kernel/Kconfig drivers/kernelsu/Kconfig 2>/dev/null \
-            || echo "::warning::CONFIG_KSU_MANUAL_HOOK not found in Kconfig — manual hook may be silently ignored"
 
-          git -C KernelSU rev-parse HEAD | tee "${GITHUB_WORKSPACE}/sukisu_commit.txt"
+          # KSN v3.2.0 Kconfig: depends on KPROBES && EXT4_FS (force both =y later)
+          echo "::notice::KSN Kconfig sample:"
+          head -20 KernelSU/kernel/Kconfig
+
+          git -C KernelSU rev-parse HEAD | tee "${GITHUB_WORKSPACE}/ksun_commit.txt"
 
           test -L drivers/kernelsu
           grep -q 'kernelsu/' drivers/Makefile
@@ -534,7 +541,7 @@ jobs:
 
           echo "::notice::printk.c DMESG_RESTRICT bypass applied (v5.4.11.3 debug kernel)"
 
-      - name: Verify SukiSU version supports SUSFS
+      - name: Verify KSN version supports SUSFS
         if: ${{ github.event.inputs.feature_profile == 'full' }}
         shell: bash
         run: |
@@ -558,7 +565,7 @@ jobs:
             echo "::notice::SukiSU version appears to fully support SUSFS."
           fi
 
-      - name: Apply non-interactive SukiSU compatibility patches
+      - name: Apply Linux 5.4 compatibility patches for KSU driver
         if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
         run: |
@@ -1297,19 +1304,18 @@ jobs:
               echo "::warning::Profile baseline_noroot selected."
               ;;
             ksu_nosusfs)
+              # v6.0.0: KSN v3.2.0 Kconfig only defines CONFIG_KSU (+ DEBUG,
+              # DISABLE_MANAGER, DISABLE_POLICY). MANUAL_HOOK/TRACEPOINT_HOOK/
+              # NONE_HOOK are SukiSU-only symbols - make oldconfig will emit
+              # "unknown symbol" warnings but keep going. The actual hook
+              # engine in KSN v3.2.0 is the kretprobe + sys_enter tracepoint
+              # mechanism (kernel/hook/syscall_hook_manager.c) which activates
+              # automatically when CONFIG_KRETPROBES=y + CONFIG_HAVE_SYSCALL_TRACEPOINTS=y.
               enable_cfg CONFIG_KSU
-              enable_cfg CONFIG_KSU_MANUAL_HOOK
-              disable_cfg CONFIG_KSU_MANUAL_SU
-              disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
-              disable_cfg CONFIG_KSU_NONE_HOOK
               ;;
             full)
               enable_cfg CONFIG_KSU
-              enable_cfg CONFIG_KSU_MANUAL_HOOK
               enable_cfg CONFIG_KSU_SUSFS
-              disable_cfg CONFIG_KSU_MANUAL_SU
-              disable_cfg CONFIG_KSU_TRACEPOINT_HOOK
-              disable_cfg CONFIG_KSU_NONE_HOOK
               # v5.4.9: AGGRESSIVE-DISABLE all SUSFS sub-features.
               # Reason: simonpunk/susfs4ksu's 50_add_susfs_in_kernel-5.4.patch
               # has multiple hunks that fail to apply on Samsung 5.4 (line
@@ -1558,7 +1564,7 @@ jobs:
           export OUT_DIR="${{ steps.cfg.outputs.out_dir }}"
           bash "${GITHUB_WORKSPACE}/build-kernel.sh"
 
-      - name: Verify built kernel has SukiSU integration (v5.4)
+      - name: Verify built kernel has KernelSU-Next integration (v6.0.0)
         if: ${{ success() && github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
         run: |
@@ -2001,7 +2007,7 @@ jobs:
         shell: bash
         run: |
           cat > "${GITHUB_WORKSPACE}/FLASH_INSTRUCTIONS.md" <<'EOF'
-          # Samsung A52s — Flash Instructions (SukiSU + SUSFS build)
+          # Samsung A52s — Flash Instructions (KernelSU-Next v3.2.0 + SUSFS build)
 
           You will flash THREE artifacts:
 
