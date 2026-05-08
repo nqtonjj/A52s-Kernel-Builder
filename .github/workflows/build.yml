@@ -868,13 +868,36 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
+          # v6.2.0: The real rules.c calls susfs_set_{priv_app,init,ksu,zygote}_sid()
+          # inside apply_kernelsu_rules(). These set the SELinux SIDs that
+          # ksu_handle_setresuid() uses to identify Zygote-spawned processes.
+          # Without them susfs_zygote_sid stays 0 → the setresuid hook always
+          # returns early → the [ksu_driver] fd is never installed for Manager
+          # → Manager shows "!KSU_NEXT || != size/hash" error.
+          # The stub must call these SID initialisers even though the SEpolicy
+          # rule loading itself is a no-op on Samsung 5.4.
           while IFS= read -r f; do [ -f "$f" ] || continue
             cat > "$f" <<'EOF'
           // SPDX-License-Identifier: GPL-2.0
-          // STUB v5.4.6 - real rules.c uses selinux_state.policy not in Samsung 5.4.
+          // STUB v6.2.0 - real rules.c uses selinux_state.policy not in Samsung 5.4.
+          // We still call susfs SID initialisers so ksu_handle_setresuid() can
+          // identify Zygote and install [ksu_driver] fd for Manager.
           #include <linux/types.h>
           #include <linux/errno.h>
-          void apply_kernelsu_rules(void) {}
+          #ifdef CONFIG_KSU_SUSFS
+          extern void susfs_set_priv_app_sid(void);
+          extern void susfs_set_init_sid(void);
+          extern void susfs_set_ksu_sid(void);
+          extern void susfs_set_zygote_sid(void);
+          #endif
+          void apply_kernelsu_rules(void) {
+          #ifdef CONFIG_KSU_SUSFS
+              susfs_set_priv_app_sid();
+              susfs_set_init_sid();
+              susfs_set_ksu_sid();
+              susfs_set_zygote_sid();
+          #endif
+          }
           int handle_sepolicy(void __user *user_data, u64 data_len) { (void)user_data; (void)data_len; return -EOPNOTSUPP; }
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
