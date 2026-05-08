@@ -282,6 +282,15 @@ jobs:
             git -C KernelSU checkout "${SUKISU_REF}"
           }
 
+          # v6.1.4: Unshallow KernelSU-Next so `git rev-list --count HEAD`
+          # returns the real commit count (2906 for v3.1.0-legacy-susfs).
+          # Without this, shallow depth=1 yields KSU_GIT_VERSION=1 →
+          # KSU_VERSION=30119 instead of 33024, causing Manager v3.1.0 to
+          # reject the kernel ("!KSU_NEXT || != size/hash").
+          git -C KernelSU fetch --unshallow origin legacy-susfs 2>/dev/null \
+            || git -C KernelSU fetch --depth=4096 origin legacy-susfs 2>/dev/null \
+            || true
+
           test -d KernelSU/kernel
           test -f KernelSU/kernel/Makefile
           test -f KernelSU/kernel/Kconfig
@@ -324,7 +333,8 @@ jobs:
           echo "::notice::KSU_GIT_VERSION=${KSU_GIT_VERSION} → KSU_VERSION=${KSU_VERSION_EXPECTED}"
           echo "::notice::Manager v3.1.0 build code 33024 must match this number."
           if [ "${KSU_VERSION_EXPECTED}" != "33024" ]; then
-            echo "::warning::KSU_VERSION (${KSU_VERSION_EXPECTED}) != 33024 — Manager pairing may fail. Expected ba4422f tag."
+            echo "::error::KSU_VERSION (${KSU_VERSION_EXPECTED}) != 33024 — Manager will reject this kernel. The KernelSU-Next repo must be unshallowed so git rev-list --count HEAD returns 2906."
+            exit 1
           fi
 
           git -C KernelSU rev-parse HEAD | tee "${GITHUB_WORKSPACE}/ksun_commit.txt"
