@@ -868,23 +868,20 @@ jobs:
           EOF
           done < <(find -L KernelSU drivers/kernelsu -path '*/policy/app_profile.c' -type f 2>/dev/null)
 
-          while IFS= read -r f; do [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          // STUB v5.4.6 - real rules.c uses selinux_state.policy not in Samsung 5.4.
-          #include <linux/types.h>
-          #include <linux/errno.h>
-          void apply_kernelsu_rules(void) {}
-          int handle_sepolicy(void __user *user_data, u64 data_len) { (void)user_data; (void)data_len; return -EOPNOTSUPP; }
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/rules.c' -type f 2>/dev/null)
-
-          while IFS= read -r f; do [ -f "$f" ] || continue
-            cat > "$f" <<'EOF'
-          // SPDX-License-Identifier: GPL-2.0
-          // STUB v5.4.6 - real sepolicy.c only called from rules.c which is also stubbed.
-          EOF
-          done < <(find -L KernelSU drivers/kernelsu -path '*/selinux/sepolicy.c' -type f 2>/dev/null)
+          # v6.2.0: Do NOT stub selinux/rules.c or selinux/sepolicy.c.
+          # Samsung 5.4 (sm7325) has all required SELinux internal APIs:
+          #   selinux_state.ss, hashtab_search, ebitmap_set_bit, avc_ss_reset,
+          #   selinux_status_update_policyload, struct policydb, type_datum, etc.
+          # The KSU-Next v3.1.0-legacy-susfs code has proper #if version guards
+          # (uses selinux_state.ss on <5.10, pointer hashtab on <5.8, etc.)
+          # so both files compile cleanly on Samsung 5.4.
+          #
+          # Keeping these files un-stubbed enables:
+          #   1. apply_kernelsu_rules(): su domain set as permissive → root works
+          #      + SUSFS SID init (susfs_set_{priv_app,init,ksu,zygote}_sid)
+          #   2. handle_sepolicy(): runtime SEpolicy patching from Manager/ksud
+          #   3. reset_avc_cache(): AVC cache flush after rule changes
+          echo "::notice::selinux/rules.c and sepolicy.c kept un-stubbed (Samsung 5.4 compatible)"
 
           echo "::notice::Injecting minmax.h"
           mkdir -p include/linux
