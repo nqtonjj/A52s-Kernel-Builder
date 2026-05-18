@@ -964,22 +964,23 @@ jobs:
           echo "::notice::Verifying ksu_compat_linkfix is in Kbuild"
           grep -n 'ksu_compat_linkfix' KernelSU/kernel/Kbuild || { echo "::error::link-fix NOT in Kbuild"; exit 1; }
 
-      - name: SukiSU-Ultra hooking strategy notice (v5.4.5)
+      - name: KSN manual VFS hook strategy notice (v7.0.0)
         if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
         run: |
-          echo "::notice::SukiSU-Ultra commit 911b075 uses LSM + kprobes runtime hooking (hook/lsm_hook.c, hook/arm64/syscall_hook.c)."
-          echo "::notice::This fork DOES NOT support classic ksu_handle_execveat/vfs_read manual fs/*.c patches."
-          echo "::notice::Manual hook patches are SKIPPED. Hooks activate at runtime via CONFIG_KPROBES=y + LSM bridge."
+          echo "::notice::v7.0.0: Switched from kprobe hooks to MANUAL VFS hooks."
+          echo "::notice::Reason: kprobes are unreliable on Samsung non-GKI 5.4 kernels."
+          echo "::notice::Manual hooks patch fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, kernel/reboot.c, drivers/input/input.c, fs/devpts/inode.c, fs/namespace.c"
+          echo "::notice::LSM hooks (task_fix_setuid, inode_rename, inode_permission) are auto-registered when KSU_KPROBES_HOOK is NOT defined."
 
-      - name: (DISABLED) Apply SukiSU manual hook patches for non-GKI
-        if: ${{ false }}
+      - name: Apply KSN manual VFS hook patches for non-GKI (v7.0.0)
+        if: ${{ github.event.inputs.feature_profile != 'baseline_noroot' }}
         shell: bash
         run: |
           set -euxo pipefail
           cd kernel
 
-          echo "::notice::Applying manual hook patches to fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, drivers/input/input.c, fs/devpts/inode.c, and fs/namespace.c"
+          echo "::notice::Applying manual hook patches to fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, kernel/reboot.c, drivers/input/input.c, fs/devpts/inode.c, and fs/namespace.c"
 
           python3 - <<'EOF'
           import os, sys
@@ -1008,11 +1009,15 @@ jobs:
               else:
                   print(f"No changes applied to {filepath} (already patched or pattern missing)")
 
+          # v7.0.0: Patch do_execve (not do_execveat_common) per KSU-Next non-GKI guide.
+          # Also patch compat_do_execve for 32-bit app support.
           patch_file('fs/exec.c', [
-              ('static int do_execveat_common(int fd, struct filename *filename,', 
-               '#ifdef CONFIG_KSU\nextern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\nstatic int do_execveat_common(int fd, struct filename *filename,'),
-              ('return __do_execve_file(fd, filename, argv, envp, flags, NULL);',
-               '#ifdef CONFIG_KSU\n\tif (unlikely(ksu_execveat_hook))\n\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\telse\n\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n#endif\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);')
+              ('int do_execve(struct filename *filename,',
+               '#ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif\nint do_execve(struct filename *filename,'),
+              ('\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}\n\nint do_execveat',
+               '#ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}\n\nint do_execveat'),
+              ('return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}\n\nstatic int compat_do_execveat',
+               '#ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n#endif\n\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n}\n\nstatic int compat_do_execveat'),
           ])
 
           patch_file('fs/open.c', [
@@ -1020,6 +1025,15 @@ jobs:
                '#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\nlong do_faccessat(int dfd, const char __user *filename, int mode)'),
               ('if (mode & ~S_IRWXO)',
                '#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n\tif (mode & ~S_IRWXO)')
+          ])
+
+          # v7.0.0: kernel/reboot.c — required by Kbuild gate for MANUAL_HOOK mode.
+          # The Kbuild gate checks: grep -q "ksu_handle_sys_reboot" kernel/reboot.c
+          patch_file('kernel/reboot.c', [
+              ('SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)',
+               '#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\nSYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)'),
+              ('/* We only trust the superuser with rebooting the system. */',
+               '#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\t/* We only trust the superuser with rebooting the system. */')
           ])
 
           patch_file('fs/read_write.c', [
@@ -1108,6 +1122,7 @@ jobs:
           grep -q 'ksu_handle_vfs_read'           fs/read_write.c      || MISSING_HOOKS+=("fs/read_write.c::ksu_handle_vfs_read")
           grep -q 'ksu_handle_stat'               fs/stat.c            || MISSING_HOOKS+=("fs/stat.c::ksu_handle_stat")
           grep -q 'ksu_handle_input_handle_event' drivers/input/input.c || MISSING_HOOKS+=("drivers/input/input.c::ksu_handle_input_handle_event")
+          grep -q 'ksu_handle_sys_reboot'         kernel/reboot.c      || MISSING_HOOKS+=("kernel/reboot.c::ksu_handle_sys_reboot")
           if [ "${#MISSING_HOOKS[@]}" -gt 0 ]; then
               echo "::error::Manual-hook call sites NOT injected into source files: ${MISSING_HOOKS[*]}"
               echo "::error::This is the v5.3 silent-fail bug — hook extern declarations may have been added but ksu_handle_*() calls were not. Build would produce a kernel that reports Hook Type: Unknown."
@@ -1582,12 +1597,10 @@ jobs:
           # v5.4.2: do NOT touch CONFIG_KPROBES — KSN Kconfig has
           # `depends on KPROBES`, so disabling it would silently drop
           # CONFIG_KSU from .config (root cause of v5.4.1 verify failure).
-          # v6.1.0: do NOT pre-disable CONFIG_KSU_KPROBES_HOOK — legacy-susfs
-          # Kbuild line 91-110 REQUIRES KPROBES_HOOK=y to set HAVE_KSU_HOOK=0;
-          # otherwise build $(error)s with "No hooks were defined".
+          # v7.0.0: Disable KPROBES_HOOK (we use MANUAL_HOOK now).
           for key in \
             CONFIG_KSU \
-            CONFIG_KSU_MANUAL_HOOK \
+            CONFIG_KSU_KPROBES_HOOK \
             CONFIG_KSU_MANUAL_SU \
             CONFIG_KSU_SUSFS \
             CONFIG_KSU_TRACEPOINT_HOOK \
@@ -1643,17 +1656,14 @@ jobs:
               echo "::warning::Profile baseline_noroot selected."
               ;;
             ksu_nosusfs)
-              # v6.1.0: KSN legacy-susfs Kconfig defines CONFIG_KSU,
-              # CONFIG_KSU_KPROBES_HOOK, CONFIG_KSU_MANUAL_HOOK, CONFIG_KSU_DEBUG,
-              # CONFIG_KSU_ALLOWLIST_WORKAROUND. Hook gate (Kbuild 91-110)
-              # requires KPROBES_HOOK=y for HAVE_KSU_HOOK=0. KSU_SUSFS stays
-              # disabled in this profile.
+              # v7.0.0: Manual VFS hooks for Samsung non-GKI 5.4.
+              # Kbuild gate checks ksu_handle_sys_reboot in kernel/reboot.c.
               enable_cfg CONFIG_KSU
-              enable_cfg CONFIG_KSU_KPROBES_HOOK
+              enable_cfg CONFIG_KSU_MANUAL_HOOK
               ;;
             full)
               enable_cfg CONFIG_KSU
-              enable_cfg CONFIG_KSU_KPROBES_HOOK
+              enable_cfg CONFIG_KSU_MANUAL_HOOK
               enable_cfg CONFIG_KSU_SUSFS
               # v6.1.0: SAFE SUSFS sub-feature subset. Strategy:
               # - DISABLE all sub-features by default (legacy-susfs Kconfig
@@ -1697,18 +1707,14 @@ jobs:
           # traces in init.c, syscall_hook_init, register_kprobe result, etc.)
           enable_cfg CONFIG_KSU_DEBUG
 
-          # v5.4.11.3: enable KPROBES_ON_FTRACE for kprobe stability on Samsung.
-          # Without ftrace backing, kprobe uses raw breakpoint instructions that
-          # can fail on hardened kernels (RKP/CFI/PAC). With ftrace backing,
-          # kprobes use the ftrace trampoline which is already authorized to
-          # patch text. This often fixes "register_kprobe failed" silent errors.
-          # Prereqs: FUNCTION_TRACER + DYNAMIC_FTRACE.
-          enable_cfg CONFIG_FUNCTION_TRACER
-          enable_cfg CONFIG_DYNAMIC_FTRACE
-          enable_cfg CONFIG_DYNAMIC_FTRACE_WITH_REGS
-          enable_cfg CONFIG_KPROBES_ON_FTRACE
-          enable_cfg CONFIG_FTRACE_SYSCALLS
-          enable_cfg CONFIG_HAVE_SYSCALL_TRACEPOINTS
+          # v7.0.0: Manual VFS hooks don't need kprobe-on-ftrace infra,
+          # but keep basic KPROBES=y (KSU Kconfig depends on it).
+          # KRETPROBES not needed in manual hook mode.
+          enable_cfg CONFIG_KPROBES
+          disable_cfg CONFIG_KPROBES_ON_FTRACE
+          disable_cfg CONFIG_FTRACE_SYSCALLS
+          disable_cfg CONFIG_HAVE_SYSCALL_TRACEPOINTS
+          disable_cfg CONFIG_KRETPROBES
 
           # v5.4.11.3: open up dmesg for shell user. CONFIG_SECURITY_DMESG_RESTRICT
           # may still be flipped to =y by Samsung defconfig overlays; the printk.c
@@ -1919,11 +1925,10 @@ jobs:
             grep -E 'CONFIG_KSU' "${KCONFIG}" || true
             exit 1
           fi
-          # v6.1.0: legacy-susfs Kbuild gate REQUIRES CONFIG_KSU_KPROBES_HOOK=y,
-          # otherwise build would have errored with "No hooks were defined".
-          # If we got here, build succeeded → KPROBES_HOOK is on. Verify in .config.
-          if ! grep -q '^CONFIG_KSU_KPROBES_HOOK=y' "${KCONFIG}"; then
-            echo "::error::CONFIG_KSU_KPROBES_HOOK is NOT =y in built .config"
+          # v7.0.0: Manual hook mode — Kbuild gate checks ksu_handle_sys_reboot
+          # in kernel/reboot.c to set HAVE_KSU_HOOK=0.
+          if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' "${KCONFIG}"; then
+            echo "::error::CONFIG_KSU_MANUAL_HOOK is NOT =y in built .config"
             grep -E 'CONFIG_KSU_KPROBES|CONFIG_KSU_MANUAL' "${KCONFIG}" || true
             exit 1
           fi
